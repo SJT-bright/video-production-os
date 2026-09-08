@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#f5f5f7">
+<title>视频制作 OS</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80'>🎬</text></svg>">
+</head>
+<body>
+
+<!--
+THESIS: 视频制作 OS 是一套 macOS-first 的 AI 短剧制作工作台，以原生 Source List、Split View 和 Inspector 组织复杂生产流程。
+OWN-WORLD: 系统材质、清晰层级、Apple 蓝交互色与真实状态文字；不伪造 Finder、Dock 或网页交通灯。
+STORY: 用户从剧本拆解进入镜头台账，再把通过门禁的逐镜提示词送入创作浏览器并回收真实素材。
+FIRST VIEWPORT: 左侧工作流目录；右侧紧凑工具栏；下方继续工作、项目状态和真实索引。
+FORM: 用户钉选的内容资产后台结构；参考图是已批准构图，产品数据和功能由本地真实索引替换。
+-->
+<div id="appShell">
+  <aside id="sidebar" aria-label="视频制作 OS 主导航">
+    <div class="side-brand">
+      <span class="brand-mark" aria-hidden="true">V</span>
+      <span class="brand-copy"><b>视频制作 OS</b></span>
+    </div>
+    <nav id="sideNav" class="side-nav" aria-label="功能目录"></nav>
+    <div class="side-status">
+      <div class="status-line"><span class="status-dot" aria-hidden="true"></span><strong id="indexHealth">本地索引待连接</strong></div>
+      <small id="lastScan">尚未扫描</small>
+    </div>
+  </aside>
+  <button id="sideScrim" class="side-scrim hidden" type="button" aria-label="关闭导航"></button>
+
+  <section id="contentShell">
+    <header id="topbar">
+      <button id="menuBtn" class="menu-btn" type="button" aria-label="打开导航" aria-expanded="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
+      <div class="tb-heading">
+        <h1 id="pageTitle">视频制作总览</h1>
+      </div>
+      <div class="tb-search" id="tbSearchBox" title="全局搜索（⌘K）">
+        <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path fill="currentColor" d="M10 2a8 8 0 1 0 4.9 14.32l5.39 5.39 1.41-1.41-5.39-5.39A8 8 0 0 0 10 2zm0 2a6 6 0 1 1 0 12 6 6 0 0 1 0-12z"/></svg>
+        <input id="tbSearch" type="search" placeholder="搜索剧本、素材、知识或规则" autocomplete="off" aria-label="全局搜索">
+        <kbd id="shortcutHint">⌘ K</kbd>
+      </div>
+      <div class="tb-actions">
+        <button class="shell-btn secondary" id="rescanBtn" type="button">重新扫描</button>
+        <button class="shell-btn primary" id="createBtn" type="button"><span aria-hidden="true">＋</span> 进入创作</button>
+        <button class="help-btn" id="tbHelpBtn" type="button" title="使用说明" aria-label="使用说明">?</button>
+      </div>
+    </header>
+
+    <main id="desktop">
+      <div id="windowsLayer" aria-live="polite"></div>
+      <template id="tplWindow">
+        <section class="window workspace-view" tabindex="-1">
+          <header class="win-titlebar">
+            <div class="win-title"><span class="win-icon"></span><span class="win-text"></span></div>
+            <div class="win-controls" aria-hidden="true">
+              <button class="wc wc-min" type="button" tabindex="-1"></button>
+              <button class="wc wc-max" type="button" tabindex="-1"></button>
+              <button class="wc wc-close" type="button" tabindex="-1"></button>
+            </div>
+          </header>
+          <div class="win-body"></div>
+          <div class="win-resize" aria-hidden="true"></div>
+        </section>
+      </template>
+    </main>
+  </section>
+</div>
+
+<!-- 进入创作前先确定剧本归属，保证图片、视频和复用资产不会跨剧混放。 -->
+<dialog id="scriptChooser" class="script-chooser" aria-labelledby="scriptChooserTitle" aria-describedby="scriptChooserDescription">
+  <div class="script-chooser-sheet">
+    <header class="script-chooser-head">
+      <div>
+        <h2 id="scriptChooserTitle">选择剧本</h2>
+        <p id="scriptChooserDescription">进入后，图片、视频和首尾帧都会保存在这个剧本的工作区。</p>
+      </div>
+      <button id="scriptChooserClose" class="script-chooser-close" type="button" aria-label="关闭剧本选择">×</button>
+    </header>
+
+    <div class="script-chooser-body">
+      <button id="inspirationProject" class="script-entry-row inspiration" type="button">
+        <span class="script-entry-symbol" aria-hidden="true">✦</span>
+        <span class="script-entry-copy">
+          <strong>灵感生成</strong>
+          <small>在独立灵感工作区自由探索，不会混入任何正式剧本。</small>
+        </span>
+        <span class="script-entry-arrow" aria-hidden="true">›</span>
+      </button>
+
+      <section class="script-recent" aria-labelledby="scriptRecentTitle">
+        <div class="script-section-head">
+          <h3 id="scriptRecentTitle">最近剧本</h3>
+          <span id="scriptProjectCount">正在读取…</span>
+        </div>
+        <div id="scriptProjectList" class="script-project-list" role="group" aria-label="最近剧本" aria-busy="true">
+          <div class="script-project-state" role="status">正在读取剧本…</div>
+        </div>
+      </section>
+
+      <section class="script-create" aria-labelledby="scriptCreateTitle">
+        <button id="showNewProject" class="script-create-toggle" type="button" aria-expanded="false" aria-controls="newProjectForm">
+          <span aria-hidden="true">＋</span>
+          <span id="scriptCreateTitle">新建剧本</span>
+        </button>
+        <form id="newProjectForm" class="script-create-form" hidden novalidate>
+          <label for="newProjectName">剧本名称</label>
+          <div class="script-create-row">
+            <input id="newProjectName" name="name" type="text" maxlength="80" autocomplete="off" placeholder="例如：夏日走廊" required>
+            <button id="createProjectSubmit" class="shell-btn primary" type="submit">创建并进入</button>
+            <button id="cancelNewProject" class="shell-btn secondary" type="button">取消</button>
+          </div>
+        </form>
+      </section>
+
+      <p id="scriptChooserStatus" class="script-chooser-status" role="status" aria-live="polite" aria-atomic="true"></p>
+    </div>
+
+    <footer class="script-chooser-foot">
+      <button id="scriptChooserCancel" class="shell-btn secondary" type="button">取消</button>
+    </footer>
+  </div>
+</dialog>
+
+<!-- 全局搜索面板 -->
+<div id="searchPanel" class="hidden" role="dialog" aria-modal="true" aria-label="全局搜索">
+  <div class="sp-box">
+    <div class="sp-input-row">
+      <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M10 2a8 8 0 1 0 4.9 14.32l5.39 5.39 1.41-1.41-5.39-5.39A8 8 0 0 0 10 2zm0 2a6 6 0 1 1 0 12 6 6 0 0 1 0-12z"/></svg>
+      <input id="spInput" type="text" placeholder="输入关键词，搜索素材文件名 / 项目知识 / Agent 规则…" autocomplete="off" aria-label="全局搜索关键词">
+      <kbd>Esc 关闭</kbd>
+    </div>
+    <div class="sp-results" id="spResults"></div>
+  </div>
+</div>
+
+<!-- 灯箱预览（图片/视频/音频/文档全屏查看） -->
+<div id="lightbox" class="hidden">
+  <div class="lb-stage" id="lbStage"></div>
+  <button class="lb-nav lb-prev" id="lbPrev" title="上一条（←）" style="display:none">‹</button>
+  <button class="lb-nav lb-next" id="lbNext" title="下一条（→）" style="display:none">›</button>
+  <span class="lb-count" id="lbCount"></span>
+  <aside class="lb-side">
+    <div class="lb-side-head">
+      <div class="lb-name" id="lbName"></div>
+      <button class="lb-close" id="lbClose" title="关闭 (Esc)">✕</button>
+    </div>
+    <div class="lb-meta" id="lbMeta"></div>
+    <div class="lb-rating" id="lbRating"></div>
+    <div class="lb-actions">
+      <button class="btn" id="lbStar">☆ 收藏</button>
+      <button class="btn" id="lbFinal">标记为成品</button>
+      <button class="btn" id="lbReject">✕ 标为废片</button>
+      <button class="btn" id="lbCopyPath">复制路径</button>
+      <button class="btn" id="lbReveal">在文件夹中显示</button>
+    </div>
+    <div class="lb-sidecar hidden" id="lbSidecar">
+      <div class="lb-sidecar-head">
+        <span>生成来源提示词（血缘）</span>
+        <button class="btn small" id="lbSidecarCopy">复制</button>
+      </div>
+      <pre class="lb-sidecar-body" id="lbSidecarBody"></pre>
+    </div>
+    <div class="lb-note">
+      <textarea id="lbNoteArea" placeholder="给这个素材写点备注（自动保存）…"></textarea>
+    </div>
+    <div class="lb-tags-section">
+      <div class="lb-tags-head">
+        <span>自定义标签</span>
+        <span class="lb-tags-hint">回车添加</span>
+      </div>
+      <div class="lb-tags-row">
+        <input id="lbTagInput" class="field" type="text" placeholder="输入标签名，按回车添加…" autocomplete="off">
+      </div>
+      <div class="lb-tags-list" id="lbTags"></div>
+    </div>
+  </aside>
+</div>
+
+<!-- 对比视图（多素材并排比较） -->
+<div id="compareBox" class="hidden">
+  <div class="cmp-head">
+    <span id="cmpTitle">并排对比</span>
+    <div class="cmp-head-actions">
+      <button class="btn small" id="cmpPlay">▶ 全部播放</button>
+      <button class="btn small" id="cmpClose">关闭 (Esc)</button>
+    </div>
+  </div>
+  <div class="cmp-grid" id="cmpGrid"></div>
+</div>
+
+<!-- 轻提示 -->
+<div id="toast" class="hidden" role="status" aria-live="polite" aria-atomic="true"></div>
+
+<script src="vendor/marked.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

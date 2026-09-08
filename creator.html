@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<!--
+THESIS: 把“先选平台”改成“先选图片或视频任务”，拒绝把四个网站堆成无上下文标签栏。
+OWN-WORLD: 延续视频制作 OS 的明亮 macOS 工作台；图片模式用 Apple 蓝，视频模式用克制的珊瑚红，只为状态和主操作着色。
+STORY: 用户选模式、整理提示词、进入对应平台、下载结果，并在同一视野确认归档位置与进度。
+FIRST VIEWPORT: 顶部模式与平台导航，左侧固定提示词工作区，右侧占主面积的真实网页浏览区，下载状态在左侧下方持续可见。
+FORM: 现有桌面工作台的 Operate 模式扩展；高密度、标准控件、无装饰性入场动画。
+-->
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#f5f5f7">
+  <title>创作浏览器｜视频制作 OS</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="creator.css">
+</head>
+<body data-mode="image" data-ready="loading">
+  <div class="creator-shell">
+    <header class="creator-header">
+      <div class="creator-brand">
+        <span class="creator-mark" aria-hidden="true">◫</span>
+        <strong>创作浏览器</strong>
+      </div>
+
+      <div class="mode-switch" role="group" aria-label="创作模式">
+        <button class="mode-button" data-mode="image" aria-pressed="true">
+          <span aria-hidden="true">▧</span>
+          图片模式
+        </button>
+        <button class="mode-button" data-mode="video" aria-pressed="false">
+          <span aria-hidden="true">▶</span>
+          视频模式
+        </button>
+      </div>
+
+      <div class="platform-strip">
+        <nav class="platform-tabs" id="platformTabs" aria-label="已打开的创作网页"></nav>
+        <button class="platform-add" id="addPlatform" type="button" aria-label="再开或打开创作网站" aria-expanded="false" aria-controls="platformPopover" title="再开一个网页／打开其他网站">＋</button>
+      </div>
+
+      <div class="header-actions">
+        <span class="download-badge hidden" id="downloadBadge" role="status">⬇ 正在下载 0 项</span>
+        <button class="project-chip" id="currentProject" type="button" title="切换剧本" aria-label="切换当前剧本">当前剧本</button>
+        <button class="asset-toggle" id="toggleAssets" type="button" aria-pressed="true" title="打开或关闭创作资产库">
+          <span aria-hidden="true">▣</span>
+          创作资产
+        </button>
+        <button class="icon-button" id="togglePrompt" title="收起或展开创作材料栏" aria-label="收起或展开创作材料栏" aria-controls="promptPanel" aria-expanded="true">◧</button>
+        <button class="quiet-button" id="showMainWindow">返回制作 OS</button>
+      </div>
+
+      <div class="platform-popover hidden" id="platformPopover">
+        <button class="secondary-action platform-duplicate" id="duplicateTab" type="button" title="为当前网站再开一个独立网页，适合批量生成">
+          再开一个「<span id="duplicateTabLabel">当前网站</span>」网页
+        </button>
+        <section class="popover-section" aria-label="打开或管理创作网站">
+          <div class="popover-section-title">打开或管理网站</div>
+          <div class="platform-open-list" id="platformOpenList"></div>
+        </section>
+        <form class="platform-form" id="platformForm" novalidate>
+          <input id="platformName" type="text" maxlength="40" autocomplete="off" aria-label="网站名称" placeholder="网站名称">
+          <input id="platformUrl" type="url" maxlength="2048" autocomplete="off" spellcheck="false" aria-label="网站地址" placeholder="粘贴 https:// 网站地址">
+          <button class="primary-action" type="submit">添加网址</button>
+          <button class="text-action" id="cancelPlatform" type="button">取消</button>
+        </form>
+        <section class="hidden-platforms" id="hiddenPlatforms" aria-labelledby="hiddenPlatformsTitle" hidden>
+          <div class="hidden-platforms-head">
+            <span id="hiddenPlatformsTitle">已从顶部移除</span>
+            <button class="text-action" id="restoreAllPlatforms" type="button">全部恢复</button>
+          </div>
+          <div class="hidden-platform-list" id="hiddenPlatformList"></div>
+        </section>
+      </div>
+    </header>
+
+    <main class="creator-workspace">
+      <aside class="prompt-panel material-sidebar" id="promptPanel" aria-label="创作材料">
+        <div class="material-sidebar-head">
+          <div>
+            <span>CREATION KIT</span>
+            <h1>创作材料</h1>
+          </div>
+          <span class="sr-only" id="draftStatus" aria-live="polite">已在本机自动保存</span>
+        </div>
+
+        <details class="material-accordion prompt-accordion" id="promptAccordion">
+          <summary>
+            <span class="accordion-icon prompt" aria-hidden="true">✦</span>
+            <span class="accordion-label"><strong>固定提示词</strong><small id="promptAccordionCount">0 条</small></span>
+            <span class="accordion-chevron" aria-hidden="true"></span>
+          </summary>
+          <div class="accordion-body">
+            <div class="prompt-editor-head">
+              <strong id="promptModeLabel">图片提示词</strong>
+              <span class="character-count" id="characterCount">0 字</span>
+            </div>
+            <textarea id="promptEditor" spellcheck="false" aria-label="当前模式提示词" placeholder="粘贴或输入提示词…"></textarea>
+            <div class="prompt-actions">
+              <button class="primary-action" id="copyPrompt" type="button" title="复制提示词；⌘Enter = 复制并切到网页">复制</button>
+              <button class="text-action" id="clearPrompt" type="button">清空</button>
+              <button class="text-action template-create-toggle" id="templateCreate" type="button">＋ 新建固定提示词</button>
+            </div>
+            <form class="template-create-form hidden" id="templateCreateForm" novalidate>
+              <input id="templateCreateName" type="text" maxlength="40" autocomplete="off" placeholder="名称，例如：人物四视图" aria-label="固定提示词名称">
+              <textarea id="templateCreateBody" rows="5" spellcheck="false" placeholder="把你自己整理的固定提示词写在这里，变量部分每次载入后再改…" aria-label="固定提示词内容"></textarea>
+              <div class="template-create-actions">
+                <button class="primary-action" type="submit">保存</button>
+                <button class="text-action" id="cancelTemplateCreate" type="button">取消</button>
+              </div>
+            </form>
+            <div class="saved-template-list" id="promptTemplateList" aria-label="已保存的固定提示词"></div>
+          </div>
+        </details>
+
+        <details class="material-accordion queue-accordion" id="queueAccordion">
+          <summary>
+            <span class="accordion-icon queue" aria-hidden="true">≣</span>
+            <span class="accordion-label"><strong>提示词队列</strong><small id="queueCount">还没有待发提示词</small></span>
+            <span class="accordion-chevron" aria-hidden="true"></span>
+          </summary>
+          <div class="accordion-body">
+            <div class="queue-actions">
+              <button class="secondary-action" id="queueAddCurrent" type="button">＋ 当前内容入队</button>
+              <button class="secondary-action" id="queueImportBreakdown" type="button">从拆解导入</button>
+              <button class="secondary-action" id="queueClearSent" type="button">清空已发送</button>
+            </div>
+            <div class="queue-list" id="queueList" aria-label="待发提示词队列"></div>
+            <p class="queue-hint">点编号即复制这条提示词并切到对应网页；粘贴后回车发送。⌘Enter 复制并切网页 · ⌘1-9 切标签 · ⌘R 刷新 · ⌘L 地址栏。队列随剧本、按图片/视频分开保存。</p>
+          </div>
+        </details>
+
+        <details class="material-accordion asset-accordion" id="assetAccordion" open>
+          <summary>
+            <span class="accordion-icon asset" aria-hidden="true">▧</span>
+            <span class="accordion-label"><strong>创作资产</strong><small id="assetAccordionCount">正在读取</small></span>
+            <span class="accordion-chevron" aria-hidden="true"></span>
+          </summary>
+          <div class="accordion-body">
+            <section class="current-shot-context is-empty" id="currentShotContext" aria-label="当前镜头">
+              <div class="shot-context-head">
+                <div class="shot-context-identity">
+                  <strong class="shot-context-code" id="currentShotCode">未选择镜头</strong>
+                  <span class="shot-context-title" id="currentShotTitle"></span>
+                </div>
+                <button class="text-action" id="changeCurrentShot" type="button">镜头台账</button>
+              </div>
+              <div class="shot-context-actions" id="shotActions">
+                <button class="secondary-action" id="switchShot" type="button">切换镜头</button>
+                <button class="secondary-action" id="nextShot" type="button">下一镜头 →</button>
+              </div>
+              <div class="shot-context-meta" id="currentShotMeta"></div>
+              <p class="shot-context-task" id="currentShotTask"></p>
+            </section>
+
+            <div class="asset-quick-actions">
+              <button class="primary-action" id="importLocalAssets" type="button">＋ 添加本地素材</button>
+              <button class="secondary-action" id="openAssetLibrary" type="button">打开完整资产库</button>
+            </div>
+            <div class="asset-drop-zone" id="assetDropZone" tabindex="0" role="button" aria-label="拖入网页图片、Finder 图片或本地视频">
+              <span class="asset-drop-icon" aria-hidden="true">↓</span>
+              <strong>拖入图片或视频</strong>
+              <small id="quickDropTarget">当前存入：全部资产（按类别自动归档）</small>
+            </div>
+            <nav class="quick-folder-tree" id="quickFolderTree" aria-label="资产分类文件夹"></nav>
+            <input id="quickFileInput" type="file" multiple hidden accept="image/*,video/*">
+
+            <section class="downloads-section" aria-labelledby="downloadsHeading">
+              <div class="section-heading compact">
+                <div>
+                  <h2 id="downloadsHeading">最近入库</h2>
+                  <span id="downloadSummary" aria-live="polite">还没有下载任务</span>
+                </div>
+                <button class="text-action" id="openModeFolder" type="button">文件夹</button>
+              </div>
+              <div class="download-list" id="downloadList" role="region" aria-label="下载入库任务"></div>
+            </section>
+          </div>
+        </details>
+      </aside>
+
+      <section class="browser-column" aria-label="平台网页">
+        <div class="browser-toolbar">
+          <div class="browser-nav" role="group" aria-label="网页导航">
+            <button class="icon-button" data-nav="back" title="后退" aria-label="后退" disabled>←</button>
+            <button class="icon-button" data-nav="forward" title="前进" aria-label="前进" disabled>→</button>
+            <button class="icon-button" data-nav="reload" title="刷新" aria-label="刷新">↻</button>
+            <button class="icon-button" data-nav="home" title="平台首页" aria-label="平台首页">⌂</button>
+          </div>
+          <form class="address-form" id="addressForm" novalidate>
+            <span class="load-dot" id="loadDot" aria-hidden="true"></span>
+            <span class="address-service" id="addressService">GPT</span>
+            <input
+              class="address-input"
+              id="addressInput"
+              type="text"
+              inputmode="url"
+              autocomplete="off"
+              autocapitalize="off"
+              spellcheck="false"
+              aria-label="输入网页地址"
+              placeholder="输入网址，例如 gemini.google.com"
+            >
+            <button class="address-go" id="addressGo" type="submit">前往</button>
+          </form>
+          <div class="browser-toolbar-actions">
+            <button class="quiet-button" id="importDownloadedFiles" type="button" title="选择刚从系统浏览器下载的文件并归档">导入刚下载的文件</button>
+            <button class="quiet-button" id="openExternal" type="button" title="在系统浏览器中打开当前页面；系统浏览器的登录状态不会同步回内嵌浏览器">系统浏览器打开</button>
+          </div>
+
+          <div class="browser-recovery" id="browserRecovery" role="alert" aria-live="assertive" aria-atomic="true" hidden>
+            <div class="browser-recovery-copy">
+              <strong>平台页面加载失败</strong>
+              <span id="browserRecoveryMessage">请重新加载，或改用系统浏览器继续。</span>
+              <span class="browser-recovery-url" id="browserRecoveryUrl"></span>
+            </div>
+            <div class="browser-recovery-actions" aria-label="平台加载恢复操作">
+              <button class="secondary-action" id="browserRecoveryReload" type="button">重新加载</button>
+              <button class="secondary-action" id="browserRecoveryExternal" type="button">系统浏览器继续</button>
+              <button class="secondary-action" id="browserRecoveryImport" type="button">导入生成文件</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="browser-stage" id="browserStage">
+          <div class="browser-placeholder">
+            <span class="placeholder-mark" aria-hidden="true">◎</span>
+            <strong id="browserPlaceholderTitle">正在连接创作平台</strong>
+            <p>网页没有出现时，可重新挂载当前平台。</p>
+            <button class="secondary-action" id="reconnectBrowser" type="button">重新显示网页</button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="creator-toast" id="creatorToast" role="status" aria-live="polite"></div>
+
+  <!-- 从剧本拆解导入提示词到队列 -->
+  <dialog id="renameDialog" class="creator-dialog rename-dialog" aria-labelledby="renameTitle">
+    <form id="renameForm" class="creator-dialog-sheet">
+      <header class="creator-dialog-head"><h2 id="renameTitle">修改名称</h2></header>
+      <div class="rename-field">
+        <input id="renameName" type="text" maxlength="40" autocomplete="off" aria-label="新名称" required>
+        <p id="renameError" role="alert"></p>
+      </div>
+      <footer class="creator-dialog-foot">
+        <button id="renameCancel" class="secondary-action" type="button">取消</button>
+        <button id="renameSave" class="primary-action" type="submit">保存</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="breakdownDialog" class="creator-dialog" aria-labelledby="breakdownTitle">
+    <div class="creator-dialog-sheet">
+      <header class="creator-dialog-head">
+        <div>
+          <h2 id="breakdownTitle">从剧本拆解导入</h2>
+          <p>选择拆解文件，把 ready 镜头的提示词批量加入队列</p>
+        </div>
+        <button class="icon-button" id="breakdownClose" type="button" aria-label="关闭">×</button>
+      </header>
+      <div class="breakdown-files" id="breakdownFiles" role="list" aria-label="拆解文件列表"></div>
+      <div class="breakdown-shots" id="breakdownShots" aria-label="拆解镜头列表"></div>
+      <footer class="creator-dialog-foot">
+        <button class="primary-action" id="breakdownImport" type="button" disabled>把选中提示词加入队列</button>
+      </footer>
+    </div>
+  </dialog>
+
+  <!-- 切换当前镜头 -->
+  <dialog id="shotDialog" class="creator-dialog" aria-labelledby="shotDialogTitle">
+    <div class="creator-dialog-sheet">
+      <header class="creator-dialog-head">
+        <div>
+          <h2 id="shotDialogTitle">切换当前镜头</h2>
+          <p>切换后，下载结果会自动关联到新镜头</p>
+        </div>
+        <button class="icon-button" id="shotDialogClose" type="button" aria-label="关闭">×</button>
+      </header>
+      <div class="shot-dialog-list" id="shotDialogList" role="list" aria-label="镜头列表"></div>
+    </div>
+  </dialog>
+
+  <!-- 清空提示词确认（可选今后都不提醒） -->
+  <dialog id="clearPromptDialog" class="creator-dialog" aria-labelledby="clearPromptTitle">
+    <div class="creator-dialog-sheet">
+      <header class="creator-dialog-head">
+        <div>
+          <h2 id="clearPromptTitle">清空当前提示词？</h2>
+          <p>当前内容会自动留一份本机快照。</p>
+        </div>
+      </header>
+      <footer class="creator-dialog-foot">
+        <button class="text-action dialog-secondary-action" id="clearPromptNever" type="button">今后都不提醒</button>
+        <button class="secondary-action" id="clearPromptCancel" type="button">取消</button>
+        <button class="primary-action" id="clearPromptConfirm" type="button">清空</button>
+      </footer>
+    </div>
+  </dialog>
+
+  <script src="creator.js"></script>
+</body>
+</html>

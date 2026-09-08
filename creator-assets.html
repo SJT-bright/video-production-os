@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#f5f5f7">
+  <title>创作资产库｜视频制作 OS</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="creator-assets.css">
+</head>
+<body data-ready="loading" data-layout="push">
+  <div
+    class="resize-handle" id="resizeHandle" role="separator" tabindex="0"
+    aria-label="调整创作资产库宽度" aria-orientation="vertical"
+    aria-valuemin="360" aria-valuemax="760" aria-valuenow="520"
+  ></div>
+
+  <main class="asset-shell">
+    <header class="asset-header">
+      <div class="asset-title">
+        <span class="asset-mark" aria-hidden="true">▣</span>
+        <div>
+          <span class="asset-breadcrumb">资产中心 / 创作资产</span>
+          <strong>创作资产库</strong>
+          <span id="librarySummary">正在读取项目资产…</span>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button class="icon-button" id="expandPanel" type="button" aria-pressed="false" aria-label="展开资产库" title="展开资产库">↔</button>
+        <button class="icon-button" id="closePanel" type="button" aria-label="关闭创作资产库" title="关闭创作资产库">×</button>
+      </div>
+    </header>
+
+    <section class="command-bar" aria-label="资产库操作">
+      <div class="command-primary">
+        <button class="primary-button" id="importAssets" type="button"><span aria-hidden="true">＋</span>导入资产</button>
+        <button class="quiet-button" id="normalizeNames" type="button" title="把当前分类里的平台乱名文件（UUID 命名）按 生成图片-001 顺序重命名">整理文件名</button>
+        <button class="quiet-button" id="newScriptFolder" type="button">切换剧本</button>
+        <button class="quiet-button" id="newSubfolder" type="button">子文件夹</button>
+      </div>
+      <div class="command-secondary">
+        <div class="layout-switch" role="group" aria-label="资产库显示方式">
+          <button type="button" data-layout="push" aria-pressed="true" title="网页和资产库并排显示，互不遮挡">并排</button>
+          <button type="button" data-layout="overlay" aria-pressed="false" title="临时覆盖网页，点击网页后收起">浮层</button>
+        </div>
+        <button class="quiet-button" id="openLibrary" type="button">Finder</button>
+      </div>
+      <input id="assetFileInput" type="file" multiple hidden accept="image/*,audio/*,video/*,.pdf,.md,.txt,.srt,.json">
+    </section>
+
+    <section class="search-row">
+      <label class="asset-search">
+        <span aria-hidden="true">⌕</span>
+        <input id="assetSearch" type="search" autocomplete="off" placeholder="搜索资产或文件夹" aria-label="搜索创作资产">
+        <button id="clearSearch" type="button" aria-label="清空搜索" title="清空搜索" hidden>×</button>
+      </label>
+      <div class="type-filter" role="group" aria-label="按资产类型筛选">
+        <button type="button" data-filter="all" aria-pressed="true">全部</button>
+        <button type="button" data-filter="image" aria-pressed="false">图片</button>
+        <button type="button" data-filter="audio" aria-pressed="false">音频</button>
+        <button type="button" data-filter="video" aria-pressed="false">视频</button>
+        <button type="button" data-filter="document" aria-pressed="false">文档</button>
+      </div>
+    </section>
+
+    <section class="asset-content">
+      <aside class="source-list" aria-labelledby="folderHeading">
+        <div class="pane-heading">
+          <div>
+            <span class="pane-kicker">SOURCE LIST</span>
+          <strong id="folderHeading">本剧资产</strong>
+          </div>
+          <button class="text-button" id="collapseFolders" type="button" aria-expanded="true">收起</button>
+        </div>
+        <div class="folder-tree" id="folderTree" role="list" aria-label="剧本资产文件夹"></div>
+        <p class="source-hint">人物、场景、音频、生成结果与首尾帧只属于当前剧本。</p>
+      </aside>
+
+      <section class="library-pane" aria-labelledby="assetHeading">
+        <div class="pane-heading library-heading">
+          <div>
+            <span class="pane-kicker" id="currentPath">创作资产库</span>
+            <strong id="assetHeading">常用资产</strong>
+          </div>
+          <div class="library-meta">
+            <span id="assetCount">0 项</span>
+            <select id="assetSort" aria-label="资产排序">
+              <option value="recent">最近使用</option>
+              <option value="name">按名称</option>
+              <option value="folder">按文件夹</option>
+            </select>
+          </div>
+        </div>
+        <div class="asset-grid" id="assetGrid">
+          <div class="asset-state">正在读取图片、音频和视频…</div>
+        </div>
+        <div class="selection-bar" id="selectionBar" hidden>
+          <strong id="selectionCount">已选 0 项</strong>
+          <span class="selection-bar-actions">
+            <button class="quiet-button" id="selectVisible" type="button">全选</button>
+            <button class="quiet-button" id="batchMove" type="button">批量移动…</button>
+            <button class="quiet-button danger" id="batchDelete" type="button">批量删除</button>
+            <button class="quiet-button" id="clearSelection" type="button">取消</button>
+          </span>
+        </div>
+      </section>
+    </section>
+
+    <footer class="asset-footer">
+      <span class="status-dot" aria-hidden="true"></span>
+      <span id="assetStatus" role="status" aria-live="polite">常用资产会保存在项目根目录的“创作资产库”</span>
+      <span class="capability-note" id="capabilityNote">桌面版支持直接拖到右侧平台</span>
+    </footer>
+  </main>
+
+  <dialog class="preview-dialog" id="previewDialog" aria-labelledby="previewName">
+    <div class="preview-frame">
+      <header>
+        <div>
+          <strong id="previewName">资产预览</strong>
+          <span id="previewPath"></span>
+        </div>
+        <button class="icon-button" id="closePreview" type="button" aria-label="关闭预览">×</button>
+      </header>
+      <div class="preview-canvas" id="previewCanvas">
+        <div id="previewMedia"></div>
+      </div>
+      <div class="preview-actions">
+        <div class="zoom-controls" id="zoomControls" hidden>
+          <button class="quiet-button" id="zoomOut" type="button" aria-label="缩小图片">−</button>
+          <input id="zoomRange" type="range" min="50" max="220" value="100" step="10" aria-label="图片缩放比例">
+          <button class="quiet-button" id="zoomIn" type="button" aria-label="放大图片">＋</button>
+          <span id="zoomValue">100%</span>
+        </div>
+        <div class="preview-primary-actions">
+          <button class="quiet-button" id="captureFirstFrame" type="button" hidden>存为首帧</button>
+          <button class="quiet-button" id="captureTailFrame" type="button" hidden>存为尾帧</button>
+          <button class="quiet-button" id="previewCopy" type="button">复制图片</button>
+          <button class="quiet-button" id="previewShow" type="button">在 Finder 中显示</button>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog class="folder-dialog" id="folderDialog" aria-labelledby="folderDialogTitle">
+    <form class="folder-form" id="folderForm">
+      <header>
+        <div>
+          <strong id="folderDialogTitle">新建子文件夹</strong>
+          <span id="folderDialogParent">位置：当前分类</span>
+        </div>
+        <button class="icon-button" id="cancelFolderTop" type="button" aria-label="取消">×</button>
+      </header>
+      <label>
+        文件夹名称
+        <input id="folderName" type="text" maxlength="80" autocomplete="off" placeholder="例如：第01集 或 女主校服">
+      </label>
+      <p>用集数、角色、场景或版本继续细分。</p>
+      <div class="folder-actions">
+        <button class="quiet-button" id="cancelFolder" type="button">取消</button>
+        <button class="primary-button" type="submit">创建</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="folder-dialog" id="renameDialog" aria-labelledby="renameDialogTitle">
+    <form class="folder-form" id="renameForm">
+      <header>
+        <div>
+          <strong id="renameDialogTitle">重命名资产</strong>
+          <span id="renameDialogFrom">位置：当前分类</span>
+        </div>
+        <button class="icon-button" id="cancelRenameTop" type="button" aria-label="取消">×</button>
+      </header>
+      <label>
+        新名称
+        <input id="renameInput" type="text" maxlength="120" autocomplete="off" placeholder="例如：女主四视图-白裙">
+      </label>
+      <p>扩展名会自动保留，可以不写。</p>
+      <div class="folder-actions">
+        <button class="quiet-button" id="cancelRename" type="button">取消</button>
+        <button class="primary-button" type="submit">重命名</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="folder-dialog" id="moveDialog" aria-labelledby="moveDialogTitle">
+    <form class="folder-form" id="moveForm" onsubmit="return false;">
+      <header>
+        <div>
+          <strong id="moveDialogTitle">移动到…</strong>
+          <span id="moveDialogHint">选择目标文件夹</span>
+        </div>
+        <button class="icon-button" id="cancelMoveTop" type="button" aria-label="取消">×</button>
+      </header>
+      <div class="move-folder-list" id="moveFolderList" role="list" aria-label="目标文件夹"></div>
+      <div class="folder-actions">
+        <button class="quiet-button" id="cancelMove" type="button">取消</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="asset-toast" id="assetToast" role="status" aria-live="polite"></div>
+  <script src="creator-assets.js"></script>
+</body>
+</html>

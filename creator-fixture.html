@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>创作平台测试页</title>
+  <style>
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: system-ui, sans-serif; background: #f4f6fb; color: #17213b; }
+    main { max-width: 540px; padding: 40px; background: white; border: 1px solid #dce1ef; border-radius: 16px; }
+    a { color: #3d5afe; margin-right: 16px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>创作平台测试页</h1>
+    <p>该页面只在 Electron 自动测试模式下使用，用于验证 WebContentsView 标签切换和导航状态，不连接第三方平台。</p>
+    <a href="#ready">测试页内导航</a>
+    <a id="testVideoDownload" download="fixture-video.mp4" href="data:video/mp4;base64,AAAAHGZ0eXBpc29tAAACAGlzb21pc28y">测试视频下载</a>
+    <div id="testAssetDropZone" style="margin-top:24px;padding:64px 24px;border:3px dashed #007aff;border-radius:16px;text-align:center">把左侧图片或视频拖到这里</div>
+    <output id="testAssetDropResult"></output>
+  </main>
+  <script src="creator-fixture.js"></script>
+</body>
+</html>

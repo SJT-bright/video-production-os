@@ -1,0 +1,51 @@
+# Dependencies and local builds
+node_modules/
+dist/
+*.app/
+*.dmg
+*.exe
+*.zip
+build-manifest.json
+runtime-config.json
+
+# Personal production data, scripts and media stay on this computer
+/data/
+/素材库/
+/创作资产库/
+/promo-video/
+/test-artifacts/
+playwright-report/
+test-results/
+coverage/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+
+# Browser profiles, credentials and local agent state
+.mimosa/
+.codex/
+.claude/
+.env
+.env.*
+!.env.example
+user-data/
+browser-profile/
+Cookies
+Cookies-journal
+Login Data
+Login Data-journal
+*.pem
+*.key
+*.p12
+*.pfx
+*.log
+
+# OS and editor files
+.DS_Store
+._*
+.idea/
+.vscode/
+*.swp
+*.tmp
+*.bak

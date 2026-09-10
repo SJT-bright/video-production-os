@@ -13,24 +13,25 @@ FORM: 现有桌面工作台的 Operate 模式扩展；高密度、标准控件�
   <meta name="color-scheme" content="light">
   <meta name="theme-color" content="#f5f5f7">
   <title>创作浏览器｜视频制作 OS</title>
-  <link rel="icon" href="data:,">
+  <link rel="icon" type="image/png" href="assets/ui/creator/studio-3d-v1.png">
   <link rel="stylesheet" href="creator.css">
+  <link rel="stylesheet" href="assets/ui/creator/ui-icons.css">
 </head>
 <body data-mode="image" data-ready="loading">
   <div class="creator-shell">
     <header class="creator-header">
       <div class="creator-brand">
-        <span class="creator-mark" aria-hidden="true">◫</span>
+        <span class="creator-mark" data-ui-icon="studio" aria-hidden="true"></span>
         <strong>创作浏览器</strong>
       </div>
 
       <div class="mode-switch" role="group" aria-label="创作模式">
         <button class="mode-button" data-mode="image" aria-pressed="true">
-          <span aria-hidden="true">▧</span>
+          <span data-ui-icon="image" aria-hidden="true"></span>
           图片模式
         </button>
         <button class="mode-button" data-mode="video" aria-pressed="false">
-          <span aria-hidden="true">▶</span>
+          <span data-ui-icon="video" aria-hidden="true"></span>
           视频模式
         </button>
       </div>
@@ -42,9 +43,9 @@ FORM: 现有桌面工作台的 Operate 模式扩展；高密度、标准控件�
 
       <div class="header-actions">
         <span class="download-badge hidden" id="downloadBadge" role="status">⬇ 正在下载 0 项</span>
-        <button class="project-chip" id="currentProject" type="button" title="切换剧本" aria-label="切换当前剧本">当前剧本</button>
+        <button class="project-chip" id="currentProject" type="button" title="切换剧本" aria-label="切换当前剧本" aria-haspopup="menu" aria-expanded="false">当前剧本</button>
         <button class="asset-toggle" id="toggleAssets" type="button" aria-pressed="true" title="打开或关闭创作资产库">
-          <span aria-hidden="true">▣</span>
+          <span data-ui-icon="library" aria-hidden="true"></span>
           创作资产
         </button>
         <button class="icon-button" id="togglePrompt" title="收起或展开创作材料栏" aria-label="收起或展开创作材料栏" aria-controls="promptPanel" aria-expanded="true">◧</button>
@@ -87,24 +88,17 @@ FORM: 现有桌面工作台的 Operate 模式扩展；高密度、标准控件�
 
         <details class="material-accordion prompt-accordion" id="promptAccordion">
           <summary>
-            <span class="accordion-icon prompt" aria-hidden="true">✦</span>
+            <span class="accordion-icon prompt" data-ui-icon="sparkle" aria-hidden="true"></span>
             <span class="accordion-label"><strong>固定提示词</strong><small id="promptAccordionCount">0 条</small></span>
             <span class="accordion-chevron" aria-hidden="true"></span>
           </summary>
           <div class="accordion-body">
-            <div class="prompt-editor-head">
-              <strong id="promptModeLabel">图片提示词</strong>
-              <span class="character-count" id="characterCount">0 字</span>
-            </div>
-            <textarea id="promptEditor" spellcheck="false" aria-label="当前模式提示词" placeholder="粘贴或输入提示词…"></textarea>
             <div class="prompt-actions">
-              <button class="primary-action" id="copyPrompt" type="button" title="复制提示词；⌘Enter = 复制并切到网页">复制</button>
-              <button class="text-action" id="clearPrompt" type="button">清空</button>
               <button class="text-action template-create-toggle" id="templateCreate" type="button">＋ 新建固定提示词</button>
             </div>
             <form class="template-create-form hidden" id="templateCreateForm" novalidate>
               <input id="templateCreateName" type="text" maxlength="40" autocomplete="off" placeholder="名称，例如：人物四视图" aria-label="固定提示词名称">
-              <textarea id="templateCreateBody" rows="5" spellcheck="false" placeholder="把你自己整理的固定提示词写在这里，变量部分每次载入后再改…" aria-label="固定提示词内容"></textarea>
+              <textarea id="templateCreateBody" rows="5" spellcheck="false" placeholder="填写提示词，保存后可直接修改标题和内容…" aria-label="固定提示词内容"></textarea>
               <div class="template-create-actions">
                 <button class="primary-action" type="submit">保存</button>
                 <button class="text-action" id="cancelTemplateCreate" type="button">取消</button>
@@ -116,13 +110,12 @@ FORM: 现有桌面工作台的 Operate 模式扩展；高密度、标准控件�
 
         <details class="material-accordion queue-accordion" id="queueAccordion">
           <summary>
-            <span class="accordion-icon queue" aria-hidden="true">≣</span>
+            <span class="accordion-icon queue" data-ui-icon="document" aria-hidden="true"></span>
             <span class="accordion-label"><strong>提示词队列</strong><small id="queueCount">还没有待发提示词</small></span>
             <span class="accordion-chevron" aria-hidden="true"></span>
           </summary>
           <div class="accordion-body">
             <div class="queue-actions">
-              <button class="secondary-action" id="queueAddCurrent" type="button">＋ 当前内容入队</button>
               <button class="secondary-action" id="queueImportBreakdown" type="button">从拆解导入</button>
               <button class="secondary-action" id="queueClearSent" type="button">清空已发送</button>
             </div>
@@ -133,7 +126,7 @@ FORM: 现有桌面工作台的 Operate 模式扩展；高密度、标准控件�
 
         <details class="material-accordion asset-accordion" id="assetAccordion" open>
           <summary>
-            <span class="accordion-icon asset" aria-hidden="true">▧</span>
+            <span class="accordion-icon asset" data-ui-icon="library" aria-hidden="true"></span>
             <span class="accordion-label"><strong>创作资产</strong><small id="assetAccordionCount">正在读取</small></span>
             <span class="accordion-chevron" aria-hidden="true"></span>
           </summary>
@@ -158,13 +151,13 @@ FORM: 现有桌面工作台的 Operate 模式扩展；高密度、标准控件�
               <button class="primary-action" id="importLocalAssets" type="button">＋ 添加本地素材</button>
               <button class="secondary-action" id="openAssetLibrary" type="button">打开完整资产库</button>
             </div>
-            <div class="asset-drop-zone" id="assetDropZone" tabindex="0" role="button" aria-label="拖入网页图片、Finder 图片或本地视频">
-              <span class="asset-drop-icon" aria-hidden="true">↓</span>
-              <strong>拖入图片或视频</strong>
+            <div class="asset-drop-zone" id="assetDropZone" tabindex="0" role="button" aria-label="拖入网页图片或本地图片、视频、音频">
+              <span class="asset-drop-icon" data-ui-icon="import" aria-hidden="true"></span>
+              <strong>拖入图片、视频或音频</strong>
               <small id="quickDropTarget">当前存入：全部资产（按类别自动归档）</small>
             </div>
             <nav class="quick-folder-tree" id="quickFolderTree" aria-label="资产分类文件夹"></nav>
-            <input id="quickFileInput" type="file" multiple hidden accept="image/*,video/*">
+            <input id="quickFileInput" type="file" multiple hidden accept="image/*,video/*,audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg,.opus,.wma,.aiff,.aif,.amr,.ape">
 
             <section class="downloads-section" aria-labelledby="downloadsHeading">
               <div class="section-heading compact">
@@ -205,8 +198,8 @@ FORM: 现有桌面工作台的 Operate 模式扩展；高密度、标准控件�
             <button class="address-go" id="addressGo" type="submit">前往</button>
           </form>
           <div class="browser-toolbar-actions">
-            <button class="quiet-button" id="importDownloadedFiles" type="button" title="选择刚从系统浏览器下载的文件并归档">导入刚下载的文件</button>
-            <button class="quiet-button" id="openExternal" type="button" title="在系统浏览器中打开当前页面；系统浏览器的登录状态不会同步回内嵌浏览器">系统浏览器打开</button>
+            <button class="quiet-button" id="importDownloadedFiles" type="button" aria-label="导入下载的文件并归档" title="选择刚从系统浏览器下载的文件并归档">导入文件</button>
+            <button class="quiet-button" id="openExternal" type="button" aria-label="在系统浏览器中打开当前页面" title="在系统浏览器中打开当前页面；系统浏览器的登录状态不会同步回内嵌浏览器">外部打开</button>
           </div>
 
           <div class="browser-recovery" id="browserRecovery" role="alert" aria-live="assertive" aria-atomic="true" hidden>
@@ -225,7 +218,7 @@ FORM: 现有桌面工作台的 Operate 模式扩展；高密度、标准控件�
 
         <div class="browser-stage" id="browserStage">
           <div class="browser-placeholder">
-            <span class="placeholder-mark" aria-hidden="true">◎</span>
+            <span class="placeholder-mark" data-ui-icon="studio" aria-hidden="true"></span>
             <strong id="browserPlaceholderTitle">正在连接创作平台</strong>
             <p>网页没有出现时，可重新挂载当前平台。</p>
             <button class="secondary-action" id="reconnectBrowser" type="button">重新显示网页</button>
@@ -283,23 +276,7 @@ FORM: 现有桌面工作台的 Operate 模式扩展；高密度、标准控件�
     </div>
   </dialog>
 
-  <!-- 清空提示词确认（可选今后都不提醒） -->
-  <dialog id="clearPromptDialog" class="creator-dialog" aria-labelledby="clearPromptTitle">
-    <div class="creator-dialog-sheet">
-      <header class="creator-dialog-head">
-        <div>
-          <h2 id="clearPromptTitle">清空当前提示词？</h2>
-          <p>当前内容会自动留一份本机快照。</p>
-        </div>
-      </header>
-      <footer class="creator-dialog-foot">
-        <button class="text-action dialog-secondary-action" id="clearPromptNever" type="button">今后都不提醒</button>
-        <button class="secondary-action" id="clearPromptCancel" type="button">取消</button>
-        <button class="primary-action" id="clearPromptConfirm" type="button">清空</button>
-      </footer>
-    </div>
-  </dialog>
-
-  <script src="creator.js"></script>
+  <script src="assets/ui/creator/ui-icons.js"></script>
+<script src="creator.js"></script>
 </body>
 </html>

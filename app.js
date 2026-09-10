@@ -409,19 +409,23 @@ const Store = {
 };
 
 /* ---------- 图标 ---------- */
-const ICONS = {
-  assets: '<svg viewBox="0 0 24 24"><path fill="url(#gA)" d="M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zm1 2v2h2V7H5zm3 0v2h2V7H8zm3 0v2h2V7h-2zm3 0v2h2V7h-2zm3 0v2h2V7h-2zM5 11v6h14v-6H5z"/></svg>',
-  creator: '<svg viewBox="0 0 24 24"><path fill="url(#gA)" d="M4 3h16a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zm0 2v14h7V5H4zm9 0v6h7V5h-7zm0 8v6h7v-6h-7zM6 8h3v2H6V8zm0 4h3v4H6v-4zm9-5h3v2h-3V7zm0 8h3v2h-3v-2z"/></svg>',
-  script: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M6 2h9l5 5v15H6V2zm8 2H8v16h10V8h-4V4zm-4 7h6v2h-6v-2zm0 4h6v2h-6v-2zm-3-3h2v2H7v-2zm0 4h2v2H7v-2z"/></svg>',
-  agent: '<svg viewBox="0 0 24 24"><path fill="url(#gA)" d="M12 2l2.4 5.4L20 9.3l-4 4 .9 6-4.9-2.8L7.1 19.3l.9-6-4-4 5.6-1.9L12 2zm0 4.2l-1.2 2.7-2.8 1 2 2-.5 3 2.5-1.4 2.5 1.4-.5-3 2-2-2.8-1L12 6.2z"/></svg>',
-  distill: '<svg viewBox="0 0 24 24"><path fill="url(#gA)" d="M6 2h12a1 1 0 0 1 1 1v18l-7-3.6L5 21V3a1 1 0 0 1 1-1zm1 2v14.4l5-2.6 5 2.6V4H7zm2.6 3.4L11 9l-1.4 1.4 1.4 1.4 1.4-1.4L15 12.2 13.6 10.8 15 9.4 13.6 8 12.2 9.4 10.8 8 9.6 7.4z" transform="translate(0 .5)"/></svg>',
-  obsidian: '<svg viewBox="0 0 24 24"><path fill="url(#gA)" d="M8.2 2.4 15 1l5.3 6.2-1.6 10.9-7 4.9-7.1-5.4L3.4 8.5l4.8-6.1zm.9 2.1L5.7 9l.9 7.5 5.2 4 4.9-3.5 1.3-9-3.8-4.5-5.1 1zm1.2 2.2 4.3-1.4 1.8 3.1-3.6 8.7-4.7-1.6 2.2-8.8z"/></svg>',
-  film: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zm1 2v2h2V7H5zm3 0v2h2V7H8zm3 0v2h2V7h-2zm3 0v2h2V7h-2zm3 0v2h2V7h-2zM5 11v6h14v-6H5z"/></svg>',
-  video: '<svg class="type-ico" viewBox="0 0 24 24"><path fill="#c65f4a" d="M4 5h12a2 2 0 0 1 2 2v2.4l4-2.4v10l-4-2.4V17a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z"/></svg>',
-  image: '<svg class="type-ico" viewBox="0 0 24 24"><path fill="#5b83b5" d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zm0 14.5V19h14v-4l-4-4-6 6-2-2-2 2.5zM8.5 8A1.5 1.5 0 1 0 8.5 11 1.5 1.5 0 0 0 8.5 8z"/></svg>',
-  audio: '<svg class="type-ico" viewBox="0 0 24 24"><path fill="#5e8c6a" d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg>',
-  doc: '<svg class="type-ico" viewBox="0 0 24 24"><path fill="#c29a3a" d="M6 2h9l5 5v15H6V2zm8 1.5V8h4.5L14 3.5zM8 11h8v2H8v-2zm0 4h8v2H8v-2z"/></svg>',
-};
+const ICONS = Object.freeze({
+  assets: UIIcons.html('library'),
+  creator: UIIcons.html('studio'),
+  script: UIIcons.html('document'),
+  agent: UIIcons.html('sparkle'),
+  distill: UIIcons.html('knowledge'),
+  obsidian: UIIcons.html('knowledge'),
+  film: UIIcons.html('film'),
+  video: UIIcons.html('video'),
+  image: UIIcons.html('image'),
+  audio: UIIcons.html('audio'),
+  doc: UIIcons.html('document'),
+  overview: UIIcons.html('studio'),
+  projects: UIIcons.html('film'),
+  help: UIIcons.html('knowledge'),
+  import: UIIcons.html('import'),
+});
 // 注入渐变 defs
 (function injectGradients() {
   const defs = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -739,7 +743,7 @@ Object.assign(WM, {
 
 /* ---------- 应用：素材库 ---------- */
 const AssetsApp = {
-  id: 'assets', title: '媒体索引', pageTitle: '媒体索引', eyebrow: 'MEDIA LIBRARY', subtitle: '项目、Downloads 与自选目录', icon: ICONS.assets, width: 940, height: 600,
+  id: 'assets', title: '媒体索引', pageTitle: '媒体索引', eyebrow: 'MEDIA LIBRARY', subtitle: '工作台、项目与自选目录', icon: ICONS.assets, width: 940, height: 600,
   async mount(root, win) {
     const S = win.state;
     S.filter = 'all'; S.source = 'all'; S.query = ''; S.showHidden = false; S.sort = 'newest';
@@ -902,7 +906,7 @@ const AssetsApp = {
       if (!totalMedia) {
         S.grid.appendChild(h('div', { class: 'empty-tip empty-guide', style: 'grid-column:1/-1' },
           h('div', { class: 'guide-title' }, '还没有可索引的图片或视频'),
-          h('p', {}, '添加 Downloads 或其他媒体目录后，这里会统一建立只读索引。'),
+          h('p', {}, '工作台导入的图片和视频会自动出现在这里，也可添加 Downloads 或其他媒体目录。'),
           h('div', { class: 'guide-actions' },
             h('button', { class: 'btn primary', onclick: () => this.importFiles(root, win) }, '选择视频导入'),
             h('button', { class: 'btn', onclick: openAssetFolder }, '打开素材库文件夹'),
@@ -1102,8 +1106,8 @@ const AudioApp = {
     S.hero.replaceChildren(
       h('div', { class: 'audio-hero-icon', html: ICONS.audio }),
       h('div', { class: 'audio-hero-copy' },
-        h('h3', {}, '素材库音频索引'),
-        h('p', {}, `只汇总 ${Store.scan.assetRoot || '素材库'} 文件夹及其子文件夹中的音频。`),
+        h('h3', {}, '音频素材'),
+        h('p', {}, '自动收录工作台与素材库中的音频，保留剧本和文件夹归属。'),
       ),
       h('div', { class: 'audio-stat' }, h('b', {}, String(allAudio.length)), h('span', {}, '全部音频')),
       h('div', { class: 'audio-stat' }, h('b', {}, String(allAudio.length - analysisCount)), h('span', {}, '常规目录')),
@@ -1144,7 +1148,7 @@ const AudioApp = {
     const files = this.available(win);
     const folders = new Map();
     files.forEach(f => {
-      const folder = parentFolderOf(f.path);
+      const folder = parentFolderOf(f.displayPath || f.path);
       folders.set(folder, (folders.get(folder) || 0) + 1);
     });
     if (S.folder !== 'all' && !folders.has(S.folder)) S.folder = 'all';
@@ -1169,11 +1173,11 @@ const AudioApp = {
   renderList(root, win) {
     const S = win.state;
     let files = this.available(win);
-    if (S.folder !== 'all') files = files.filter(f => parentFolderOf(f.path) === S.folder);
+    if (S.folder !== 'all') files = files.filter(f => parentFolderOf(f.displayPath || f.path) === S.folder);
     if (S.query.trim()) {
       const q = S.query.trim().toLowerCase();
       files = files.filter(f =>
-        (f.path + ' ' + ((f.meta && f.meta.note) || '') + ' ' + ((f.meta && f.meta.tags) || []).join(' ')).toLowerCase().includes(q));
+        ((f.displayPath || f.path) + ' ' + (f.projectName || '') + ' ' + ((f.meta && f.meta.note) || '') + ' ' + ((f.meta && f.meta.tags) || []).join(' ')).toLowerCase().includes(q));
     }
     files = sortAssets(files, S.sort);
     S.viewList = files;
@@ -1181,8 +1185,8 @@ const AudioApp = {
     if (!files.length) {
       if (!this.all().length) {
         S.list.replaceChildren(h('div', { class: 'empty-tip audio-empty empty-guide' },
-          h('div', { class: 'guide-title' }, '素材库还没有音频'),
-          h('p', {}, '这里仅收集和索引素材库中的真实音频，不会把音频自动作为生成参考。导入完成后会自动刷新并按实际文件夹归组。'),
+          h('div', { class: 'guide-title' }, '还没有音频素材'),
+          h('p', {}, '在创作工作台或这里导入音频后，会自动收录并按原文件夹归组，不需要重复上传。'),
           h('div', { class: 'guide-actions' },
             h('button', { class: 'btn primary', onclick: () => this.importFiles(root, win) }, '选择音频导入'),
             h('button', { class: 'btn', onclick: openAssetFolder }, '打开素材库文件夹'),
@@ -1196,6 +1200,7 @@ const AudioApp = {
     S.list.replaceChildren(...files.map(f => this.row(root, win, f)));
   },
   row(root, win, f) {
+    const S = win.state;
     const meta = f.meta || {};
     const tags = Array.isArray(meta.tags) ? meta.tags : [];
     const openDetail = () => {
@@ -1206,7 +1211,7 @@ const AudioApp = {
       h('div', { class: 'audio-row-icon', html: ICONS.audio }),
       h('div', { class: 'audio-row-main' },
         h('button', { class: 'audio-name', title: '打开音频详情', onclick: openDetail }, f.name),
-        h('div', { class: 'audio-path', title: f.path }, f.path),
+        h('div', { class: 'audio-path', title: f.displayPath || f.path }, f.displayPath || f.path),
         h('div', { class: 'audio-row-meta' },
           S.durSpans[f.path] = h('span', { class: 'audio-dur' }, ''),
           h('span', {}, f.sizeText), h('span', {}, fmtDate(f.mtime)),
@@ -1400,7 +1405,7 @@ const ObsidianApp = {
     ));
     const shown = items.slice(0, 600);
     for (const item of shown) {
-      const icon = item.kind === 'folder' ? '▸' : item.kind === 'note' ? '◇' : item.previewable ? '◫' : '·';
+      const icon = item.kind === 'folder' ? ICONS.assets : item.kind === 'note' ? ICONS.doc : item.previewable ? ICONS.image : ICONS.doc;
       const label = item.kind === 'note' ? item.name.replace(/\.md$/i, '') : item.name;
       S.entries.appendChild(h('button', {
         class: `obsidian-entry ${item.kind}`,
@@ -1411,7 +1416,7 @@ const ObsidianApp = {
           else this.openFile(win, item);
         },
       },
-        h('span', { class: 'obsidian-entry-icon' }, icon),
+        h('span', { class: 'obsidian-entry-icon', html: icon, 'aria-hidden': 'true' }),
         h('span', { class: 'obsidian-entry-main' },
           h('span', { class: 'obsidian-entry-name' }, label),
           h('span', { class: 'obsidian-entry-path' }, item.path),
@@ -2143,7 +2148,6 @@ const CreatorEntry = {
     for (const project of projects) {
       const name = String(project.name || project.title || '未命名剧本').trim() || '未命名剧本';
       const current = project.id === this.activeProjectId;
-      const symbol = Array.from(name)[0] || '剧';
       fragment.appendChild(h('button', {
         class: `script-project-option${current ? ' current' : ''}`,
         type: 'button',
@@ -2151,7 +2155,7 @@ const CreatorEntry = {
         title: name,
         onclick: () => this.activateProject(project.id, name),
       },
-        h('span', { class: 'script-project-symbol', 'aria-hidden': 'true' }, symbol),
+        h('span', { class: 'script-project-symbol', html: ICONS.script, 'aria-hidden': 'true' }),
         h('span', { class: 'script-project-copy' },
           h('strong', {}, name),
           h('small', {}, current ? '当前剧本 · 图片和视频共享此工作区' : '图片和视频共享此剧本工作区'),
@@ -2286,13 +2290,13 @@ const CreatorApp = {
       ),
       h('div', { class: 'creator-lanes' },
         lane({
-          mode: 'image', title: '图片设计', system: 'IMAGE SYSTEM', identifier: 'assets/ui/creator/image-system-identifier-v1.png',
+          mode: 'image', title: '图片设计', system: 'IMAGE SYSTEM', identifier: 'assets/ui/creator/image-3d-v1.png',
           description: '角色、服装、场景、首帧与色卡。',
           archive: 'Obsidian · 浏览器生成',
           platforms: [['GPT 图片', 'https://chatgpt.com/'], ['Midjourney', 'https://www.midjourney.com/'], ['核绘', HEHUI_PROJECT_URL]],
         }),
         lane({
-          mode: 'video', title: '视频设计', system: 'VIDEO SYSTEM', identifier: 'assets/ui/creator/video-system-identifier-v1.png',
+          mode: 'video', title: '视频设计', system: 'VIDEO SYSTEM', identifier: 'assets/ui/creator/video-3d-v1.png',
           description: '镜头动作、对白、时长与尾帧连续性。',
           archive: '素材库 · 浏览器生成',
           platforms: [['GPT 提示词', 'https://chatgpt.com/'], ['Updream', 'https://www.updream.cn/'], ['小云雀', 'https://xyq.jianying.com/'], ['核绘', HEHUI_PROJECT_URL]],
@@ -2491,7 +2495,7 @@ const ScriptWorkbenchApp = {
         'aria-pressed': String(item.filename === S.selectedFilename),
         onclick: () => this.selectDocument(root, win, item.filename),
       },
-        h('span', { class: 'script-doc-icon', 'aria-hidden': 'true' }, '⌘'),
+        h('span', { class: 'script-doc-icon', html: ICONS.script, 'aria-hidden': 'true' }),
         h('span', { class: 'script-doc-copy' },
           h('strong', {}, item.title),
           h('small', {}, `${item.episode} · ${item.shots} 镜 · ${item.ready} 可生成`),
@@ -2639,7 +2643,7 @@ const ScriptWorkbenchApp = {
 const CreativeAssetsApp = {
   id: 'creative-assets', title: '创作资产', pageTitle: '创作资产', eyebrow: 'ASSET CENTER',
   subtitle: '生成前输入 · 角色、场景、色卡、音频与视频参考',
-  icon: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M5 3h6a2 2 0 0 1 1.4.6L14 5h5a2 2 0 0 1 2 2v11a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V6a3 3 0 0 1 2-3zm0 2v13a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V7h-5.8L11 5H5zm3 5h8v2H8v-2zm0 4h5v2H8v-2z"/></svg>',
+  icon: ICONS.assets,
   width: 1180, height: 720,
   mount(root) {
     const frame = h('iframe', {
@@ -2652,8 +2656,8 @@ const CreativeAssetsApp = {
       h('aside', { class: 'asset-center-note' },
         h('span', { 'aria-hidden': 'true' }, 'i'),
         h('p', {},
-          h('strong', {}, '同属资产中心，底层仍分开保存。'),
-          ' 创作资产是生成前反复使用的输入参考；视频素材、音频素材和成片是生成或拍摄后的输出，互不混放。',
+          h('strong', {}, '导入一次，各栏目自动收录。'),
+          ' 工作台的图片、视频和音频会同步到媒体索引与音频素材，原文件仍按剧本保存；确认的最终视频才进入成片库。',
         ),
         h('button', { class: 'text-link', type: 'button', onclick: () => WM.open('assets') }, '查看视频素材'),
       ),
@@ -2664,7 +2668,7 @@ const CreativeAssetsApp = {
 
 /* ---------- 应用：帮助 ---------- */
 const HelpApp = {
-  id: 'help', title: '使用说明', pageTitle: '使用说明', eyebrow: 'HELP', subtitle: '本机工作流、数据边界与快捷键', icon: '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm1 17h-2v-2h2v2zm2.1-7.7-.9.9c-.7.7-1.2 1.3-1.2 2.8h-2v-.5c0-1.1.5-2.1 1.2-2.8l1.2-1.3c.4-.3.6-.8.6-1.4a2 2 0 1 0-4 0H8a4 4 0 1 1 8 0c0 .9-.4 1.7-.9 2.3z"/></svg>',
+  id: 'help', title: '使用说明', pageTitle: '使用说明', eyebrow: 'HELP', subtitle: '本机工作流、数据边界与快捷键', icon: ICONS.help,
   width: 620, height: 520,
   mount(root) {
     const body = h('div', { class: 'md-body', style: 'overflow-y:auto;height:100%' });
@@ -2681,14 +2685,14 @@ const HelpApp = {
 ### 📦 资产中心
 - **创作资产**与**视频素材、音频素材、成片、Obsidian 资产**统一放在侧栏“资产中心”类别中，入口和操作语言保持一致。
 - 创作资产保存在项目根目录的 \`创作资产库\`，用于生成前反复引用的角色图、场景图、色卡、参考音频、参考视频和文档；可按剧本建立上下级文件夹。
-- 视频素材和音频素材继续保存在 \`素材库\`，代表已经生成、拍摄或下载回来的制作结果。两类资产同属一个界面类别，但不会移动或混合底层文件。
-- 视频素材只扫描 \`素材库\` 文件夹及其子文件夹里的 **视频**，不再混入蒸馏证据图片和分析文件。
+- 工作台上传、拖入和归档到 \`创作资产库\` 的图片、视频、音频，自动收录到媒体索引与音频素材；按原剧本和文件夹保留归属，无需再次上传。
+- 原 \`素材库\` 与手动添加的 Downloads 等目录继续保留索引；只读取原文件，不搬动或复制。视频明确标记为成品后才进入成片库。
 - 点缩略图全屏预览，视频可直接拖进度条播放。
 - 可给素材 **收藏 ★**、**标记为成品**、写备注，全部自动保存在 \`视频制作OS/data/asset-meta.json\`。
 - 既有 Obsidian 人物、服装、场景和色卡仍以只读索引保留，可逐步把高频引用内容预存到创作资产库。
 
 ### 🎵 音频库
-- 只汇总 \`素材库\` 文件夹及其子文件夹中的音频，不读取蒸馏和分析目录里的音频。
+- 自动汇总 \`素材库\` 与各剧本 \`创作资产库\` 中的音频，工作台导入后自动刷新。
 - 支持按实际父目录分组、名称或路径搜索、修改时间／名称／大小／文件夹排序。
 - 每条音频可直接播放，并复用素材库的收藏、标签、备注和 Finder／文件夹定位能力。
 
@@ -2754,7 +2758,7 @@ const dashboardMediaCard = (file, list) => {
 
 const OverviewApp = {
   id: 'overview', title: '总览', pageTitle: '视频制作总览', eyebrow: 'CONTENT PRODUCTION', subtitle: '从剧本拆解继续到镜头生成与成片归档',
-  icon: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M4 4h7v7H4V4zm9 0h7v4h-7V4zM4 13h7v7H4v-7zm9-3h7v10h-7V10z"/></svg>',
+  icon: ICONS.overview,
   mount(root, win) { this.render(root, win); },
   render(root) {
     const scan = Store.scan;
@@ -2777,7 +2781,7 @@ const OverviewApp = {
     const recentSection = recent.length
       ? h('div', { class: 'recent-grid' }, ...recent.map(file => dashboardMediaCard(file, recent)))
       : h('div', { class: 'recent-empty' },
-        h('div', { class: 'recent-empty-mark', 'aria-hidden': 'true' }, '＋'),
+        h('div', { class: 'recent-empty-mark', html: ICONS.import, 'aria-hidden': 'true' }),
         h('div', {},
           h('strong', {}, '还没有媒体'),
           h('p', {}, '添加 Downloads、其他媒体目录，或从创作浏览器生成。'),
@@ -2801,7 +2805,7 @@ const OverviewApp = {
         h('div', { class: 'overview-system-map', 'aria-label': '创作系统' },
           h('button', { class: 'overview-system-card image', type: 'button', onclick: () => CreatorEntry.open({ preferredMode: 'image' }) },
             h('span', { class: 'overview-system-identifier' },
-              h('img', { src: 'assets/ui/creator/image-system-identifier-v1.png', alt: '', loading: 'eager', decoding: 'async' }),
+              h('img', { src: 'assets/ui/creator/image-3d-v1.png', alt: '', loading: 'eager', decoding: 'async' }),
             ),
             h('span', { class: 'overview-system-copy' },
               h('small', {}, 'IMAGE SYSTEM'),
@@ -2811,7 +2815,7 @@ const OverviewApp = {
           ),
           h('button', { class: 'overview-system-card video', type: 'button', onclick: () => CreatorEntry.open({ preferredMode: 'video' }) },
             h('span', { class: 'overview-system-identifier' },
-              h('img', { src: 'assets/ui/creator/video-system-identifier-v1.png', alt: '', loading: 'eager', decoding: 'async' }),
+              h('img', { src: 'assets/ui/creator/video-3d-v1.png', alt: '', loading: 'eager', decoding: 'async' }),
             ),
             h('span', { class: 'overview-system-copy' },
               h('small', {}, 'VIDEO SYSTEM'),
@@ -2848,7 +2852,7 @@ const SHOT_STATUS_LABELS = {
 
 const ProjectsApp = {
   id: 'projects', title: '镜头台账', pageTitle: '镜头台账', eyebrow: 'SHOT LEDGER', subtitle: '当前镜头、生产阶段与下载归属',
-  icon: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M3 5a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v11a3 3 0 0 1-3 3H5a2 2 0 0 1-2-2V5zm2 3v11h13a1 1 0 0 0 1-1V8H5z"/></svg>',
+  icon: ICONS.projects,
   editorDrafts: new Map(),
   skipDraftCapture: new Set(),
   createDraft: null,
@@ -3162,7 +3166,7 @@ const ProjectsApp = {
 
 const FinalsApp = {
   id: 'finals', title: '成片库', pageTitle: '成片库', eyebrow: 'APPROVED OUTPUTS', subtitle: '只收录你明确确认的最终视频',
-  icon: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M3 5h18v14H3V5zm2 2v2h2V7H5zm4 0v2h2V7H9zm4 0v2h2V7h-2zm4 0v2h2V7h-2zM5 11v6h14v-6H5zm5 1 5 2.5-5 2.5v-5z"/></svg>',
+  icon: ICONS.projects,
   mount(root, win) { this.render(root, win); },
   render(root) {
     const scan = Store.scan;
@@ -3170,7 +3174,7 @@ const FinalsApp = {
     const content = finals.length
       ? h('div', { class: 'finals-grid' }, ...finals.map(file => dashboardMediaCard(file, finals)))
       : h('div', { class: 'library-empty' },
-        h('span', { class: 'library-empty-mark', 'aria-hidden': 'true' }, '●'),
+        h('span', { class: 'library-empty-mark', html: ICONS.film, 'aria-hidden': 'true' }),
         h('h3', {}, '还没有标记为成片的视频'),
         h('p', {}, '普通视频不会自动进入成片库。在素材预览中确认后点击“标记为成品”，它才会出现在这里。'),
         h('button', { class: 'shell-btn primary', type: 'button', onclick: () => WM.open('assets') }, '前往视频素材库'),
@@ -3359,7 +3363,7 @@ const Lightbox = {
       const aud = h('audio', { src: fileUrl(f.path), controls: true, preload: 'metadata' });
       aud.addEventListener('loadedmetadata', () => { $('#lbDur').textContent = `时长 ${fmtDur(aud.duration)}`; });
       stage.appendChild(h('div', { style: 'display:flex;flex-direction:column;align-items:center;gap:14px' },
-        h('span', { html: ICONS.audio, style: 'transform:scale(2.4);transform-origin:center' }),
+        h('span', { class: 'lb-audio-art', html: ICONS.audio, 'aria-hidden': 'true' }),
         aud,
       ));
     }
@@ -3614,6 +3618,35 @@ const SearchPanel = {
 };
 
 /* ---------- 启动 ---------- */
+let mediaRefreshTask = null;
+let mediaRefreshPending = false;
+function refreshMediaLibraries() {
+  mediaRefreshPending = true;
+  if (mediaRefreshTask) return mediaRefreshTask;
+  mediaRefreshTask = (async () => {
+    do {
+      mediaRefreshPending = false;
+      await Store.loadScan(true);
+      for (const id of ['overview', 'projects', 'finals', 'assets', 'audio']) {
+        const win = WM.windows.get(id);
+        if (!win) continue;
+        const body = win.el.querySelector('.win-body');
+        if (!body) continue;
+        const scrollTop = body.scrollTop;
+        if (id === 'assets') {
+          if (!win.state.grid) continue;
+          AssetsApp.buildCollections(body, win);
+          AssetsApp.buildToolbar(body, win);
+        }
+        if (id === 'audio' && !win.state.list) continue;
+        APPS[id].render?.(body, win);
+        body.scrollTop = scrollTop;
+      }
+    } while (mediaRefreshPending);
+  })().finally(() => { mediaRefreshTask = null; });
+  return mediaRefreshTask;
+}
+
 async function boot() {
   const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
   document.documentElement.classList.toggle('is-electron', !!window.desktopOS?.isElectron);
@@ -3627,22 +3660,16 @@ async function boot() {
     CreatorEntry.open({ preferredMode: mode });
   });
 
-  // 桌面创作浏览器完成下载后，刷新对应索引；图片与视频保持两条独立归档链路。
+  // 工作台下载与导入共用索引刷新；不重新挂载页面，保留当前筛选。
   if (window.desktopOS?.onDownloadComplete) {
     window.desktopOS.onDownloadComplete(async download => {
       try {
+        await refreshMediaLibraries();
         if (String(download.kind || '').startsWith('image')) {
           const obsidianWindow = WM.windows.get('obsidian');
           if (obsidianWindow) await ObsidianApp.mount(obsidianWindow.el.querySelector('.win-body'), obsidianWindow);
-          toast(`图片已归档到 Obsidian：${download.filename}`);
-          return;
         }
-        await Store.loadScan(true);
-        for (const [id, app] of [['overview', OverviewApp], ['projects', ProjectsApp], ['finals', FinalsApp], ['assets', AssetsApp], ['audio', AudioApp]]) {
-          const openWindow = WM.windows.get(id);
-          if (openWindow) await app.mount(openWindow.el.querySelector('.win-body'), openWindow);
-        }
-        toast(`素材库已更新：${download.filename}`);
+        toast(`素材索引已更新：${download.filename}`);
       } catch (error) {
         toast(`文件已下载，但索引刷新失败：${error.message}`);
       }
@@ -3665,12 +3692,7 @@ async function boot() {
     button.disabled = true;
     button.textContent = '扫描中…';
     try {
-      await Store.loadScan(true);
-      for (const [id, win] of WM.windows) {
-        const app = APPS[id];
-        const body = win.el.querySelector('.win-body');
-        if (app && app.render) app.render(body, win);
-      }
+      await refreshMediaLibraries();
       toast('索引已更新；原始文件未被修改');
     } catch (error) {
       toast('重新扫描失败：' + error.message);
@@ -3750,17 +3772,12 @@ async function boot() {
     const es = new EventSource('/api/events');
     es.addEventListener('rescan', async () => {
       try {
-        await Store.loadScan(true);
-        for (const id of ['overview', 'projects', 'finals', 'assets', 'audio']) {
-          const w = WM.windows.get(id);
-          if (w) {
-            const app = APPS[id];
-            const body = w.el.querySelector('.win-body');
-            if (app.render) app.render(body, w);
-          }
-        }
-        toast('素材有更新，索引已自动刷新');
-      } catch {}
+        await refreshMediaLibraries();
+      } catch (error) { toast(`素材索引刷新失败：${error.message}`); }
+    });
+    es.addEventListener('open', () => {
+      // 断线重连后补上期间的素材变动；首次加载仍由 boot 负责。
+      if (Store.scan) refreshMediaLibraries().catch(() => {});
     });
     es.addEventListener('production', async () => {
       try {

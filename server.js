@@ -244,6 +244,7 @@ function requireProjectAssetPath(project, value, { allowProjectRoot = true } = {
 }
 
 const EXTERNAL_MEDIA_TOKEN_PREFIX = '@media/';
+const WORKBENCH_MEDIA_SOURCE_ID = 'creative-assets';
 
 function indexedMediaPath(sourceId, relativePath) {
   if (sourceId === PROJECT_MEDIA_SOURCE_ID) {
@@ -261,6 +262,12 @@ function resolveIndexedMedia(relPath) {
     if (separator <= 0) return null;
     const sourceId = token.slice(0, separator);
     const relativePath = token.slice(separator + 1);
+    if (sourceId === WORKBENCH_MEDIA_SOURCE_ID) {
+      const entry = resolveCreativeAsset(CREATIVE_ASSET_DIR, relativePath, 'file');
+      const type = entry && classifyCreativeAsset(entry.rel);
+      if (!entry || !['image', 'video', 'audio'].includes(type)) return null;
+      return { ...entry, type, sourceId, relativePath: entry.rel };
+    }
     const entry = mediaSourceStore.resolveFile(sourceId, relativePath);
     return entry ? { abs: entry.absolutePath, stat: { size: entry.size }, type: entry.type, sourceId, relativePath } : null;
   }
@@ -496,8 +503,65 @@ function parseManifest() {
   return table;
 }
 
+// 工作台与媒体栏目共用原文件；不迁移资产，也不依赖当前选中的剧本。
+function includeWorkbenchMedia(mediaScan) {
+  const source = {
+    id: WORKBENCH_MEDIA_SOURCE_ID, token: WORKBENCH_MEDIA_SOURCE_ID,
+    label: '创作工作台', kind: 'workbench', builtIn: true, removable: false,
+    mediaTypes: ['image', 'video', 'audio'], available: false, status: 'offline',
+    fileCount: 0, counts: { image: 0, video: 0, audio: 0 }, truncated: false,
+  };
+  let snapshot;
+  try { snapshot = buildCreativeAssetTree(CREATIVE_ASSET_DIR); }
+  catch { return { ...mediaScan, sources: [...mediaScan.sources, source] }; }
+  source.available = true;
+  source.status = 'online';
+  source.truncated = snapshot.truncated;
+
+  const projects = creativeProjectStore.list();
+  const media = [];
+  const collect = node => {
+    if (node.kind === 'folder') (node.children || []).forEach(collect);
+    else if (source.mediaTypes.includes(node.type)) media.push(node);
+  };
+  collect(snapshot.tree);
+  const workbenchRoot = fs.realpathSync(CREATIVE_ASSET_DIR);
+  const byAbsolutePath = new Map(media.map(file => [path.join(workbenchRoot, ...file.path.split('/')), file]));
+  const names = new Set(media.map(file => file.name));
+  const projectFor = file => {
+    const project = projects.find(item => file.path.startsWith(`${item.folder}/`));
+    return { projectId: project?.id || '', projectName: project?.name || file.path.split('/')[0] };
+  };
+  // 若用户以前手动索引过同一目录，保留旧 token/收藏等标记，不重复显示原文件。
+  const files = mediaScan.files.map(file => {
+    if (!names.has(file.name)) return file;
+    const entry = mediaSourceStore.resolveFile(file.sourceId, file.relativePath);
+    const workbenchFile = entry && byAbsolutePath.get(entry.absolutePath);
+    if (!workbenchFile) return file;
+    byAbsolutePath.delete(entry.absolutePath);
+    return { ...file, ...projectFor(workbenchFile) };
+  });
+  for (const file of byAbsolutePath.values()) {
+    files.push({
+      ...file, ...projectFor(file), sourceId: source.id, sourceToken: source.id,
+      sourceLabel: source.label, relativePath: file.path,
+      displayPath: `${source.label}/${file.path}`,
+      assetKey: `media-${crypto.createHash('sha256').update(source.id).update('\0').update(file.path).digest('hex')}`,
+    });
+    source.fileCount++;
+    source.counts[file.type]++;
+  }
+  files.sort((a, b) => b.mtime.localeCompare(a.mtime) || a.assetKey.localeCompare(b.assetKey));
+  const counts = { image: 0, video: 0, audio: 0 };
+  files.forEach(file => { counts[file.type]++; });
+  return {
+    ...mediaScan, files, counts, sources: [...mediaScan.sources, source],
+    truncated: mediaScan.truncated || snapshot.truncated,
+  };
+}
+
 function handleScan() {
-  const mediaScan = mediaSourceStore.scan();
+  const mediaScan = includeWorkbenchMedia(mediaSourceStore.scan());
   const projectSource = mediaScan.sources.find(source => source.id === PROJECT_MEDIA_SOURCE_ID);
   const assetAvailable = projectSource?.available === true;
   const savedMeta = readJson(META_FILE, { version: 1, items: {} });
@@ -728,6 +792,19 @@ const IMPORT_KIND_LABELS = { image: '生成图片', video: '生成视频' };
 
 function renameAssetEverywhere(oldAbs, newAbs) {
   fs.renameSync(oldAbs, newAbs);
+  // 保留统一媒体索引中的收藏、备注及成片标记。
+  if (isWithin(CREATIVE_ASSET_DIR, oldAbs) && isWithin(CREATIVE_ASSET_DIR, newAbs)) {
+    const oldKey = indexedMediaPath(WORKBENCH_MEDIA_SOURCE_ID, toPosixRelative(CREATIVE_ASSET_DIR, oldAbs));
+    const newKey = indexedMediaPath(WORKBENCH_MEDIA_SOURCE_ID, toPosixRelative(CREATIVE_ASSET_DIR, newAbs));
+    if (oldKey !== newKey) {
+      const meta = readJson(META_FILE, { version: 1, items: {} });
+      if (meta.items?.[oldKey]) {
+        meta.items[newKey] = meta.items[oldKey];
+        delete meta.items[oldKey];
+        writeJson(META_FILE, meta);
+      }
+    }
+  }
   // sidecar 命名是「去扩展名的文件名.prompt.txt」，与 /api/prompt-sidecar 保持一致。
   const oldParsed = path.parse(oldAbs);
   const newParsed = path.parse(newAbs);
@@ -884,6 +961,7 @@ function broadcastBreakdowns() {
 
 function broadcastCreativeAssets() {
   broadcastEvent('creative-assets');
+  scheduleRescanBroadcast();
 }
 
 function broadcastCreativeProjects() {
@@ -1552,12 +1630,16 @@ const server = http.createServer(async (req, res) => {
 
     if (p === '/api/prompt-sidecar') {
       if (req.method === 'GET') {
+        if (!isTrustedLocalUiRequest(req)) { sendJson(res, 403, { error: '拒绝跨站读取' }); return; }
         const rel = (url.searchParams.get('p') || '').replace(/\\/g, '/');
-        const entry = safeExistingFile(ROOT, rel);
+        const entry = rel.startsWith(`${EXTERNAL_MEDIA_TOKEN_PREFIX}${WORKBENCH_MEDIA_SOURCE_ID}/`)
+          ? resolveIndexedMedia(rel) : safeExistingFile(ROOT, rel);
         if (!entry) { sendJson(res, 404, { error: '文件不存在' }); return; }
         const parsed = path.parse(entry.abs);
         const sidecar = path.join(parsed.dir, parsed.name + '.prompt.txt');
         try {
+          const stat = fs.lstatSync(sidecar);
+          if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('不是普通文件');
           const text = fs.readFileSync(sidecar, 'utf-8');
           sendJson(res, 200, { found: true, content: text.slice(0, 20000) });
         } catch { sendJson(res, 200, { found: false }); }

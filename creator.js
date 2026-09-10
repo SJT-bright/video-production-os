@@ -5,8 +5,8 @@ const API = typeof window.creatorOS?.getConfig === 'function' ? window.creatorOS
 const LEGACY_STORAGE_KEY = 'videoOS.creator.workspace.v1';
 const GLOBAL_STORAGE_KEY = 'videoOS.creator.global.v2';
 const PROJECT_STORAGE_PREFIX = 'videoOS.creator.project.v2.';
-const ASSET_LAYOUT_VERSION = 2;
-const DEFAULT_ASSET_PANEL = Object.freeze({ open: false, layout: 'push', width: 520, layoutVersion: ASSET_LAYOUT_VERSION });
+const ASSET_LAYOUT_VERSION = 3;
+const DEFAULT_ASSET_PANEL = Object.freeze({ open: false, layout: 'overlay', width: 520, layoutVersion: ASSET_LAYOUT_VERSION });
 
 const MODE_COPY = Object.freeze({
   image: { label: '图片提示词', placeholder: '粘贴或输入图片提示词…' },
@@ -51,7 +51,7 @@ const el = Object.fromEntries([
   'platformOpenList', 'duplicateTab', 'duplicateTabLabel',
   'renameDialog', 'renameForm', 'renameTitle', 'renameName', 'renameError', 'renameCancel', 'renameSave',
   'hiddenPlatforms', 'hiddenPlatformList', 'restoreAllPlatforms',
-  'promptEditor', 'draftStatus', 'promptModeLabel', 'characterCount',
+  'draftStatus',
   'promptAccordion', 'promptAccordionCount', 'assetAccordion', 'assetAccordionCount',
   'promptTemplateList',
   'templateCreate', 'templateCreateForm', 'templateCreateName', 'templateCreateBody', 'cancelTemplateCreate',
@@ -60,16 +60,14 @@ const el = Object.fromEntries([
   'downloadSummary', 'downloadList', 'openModeFolder', 'browserStage', 'addressService',
   'browserPlaceholderTitle', 'reconnectBrowser',
   'addressForm', 'addressInput', 'addressGo', 'loadDot', 'openExternal', 'togglePrompt', 'showMainWindow', 'creatorToast',
-  'copyPrompt', 'importDownloadedFiles', 'browserRecovery',
+  'importDownloadedFiles', 'browserRecovery',
   'browserRecoveryMessage', 'browserRecoveryUrl', 'browserRecoveryReload',
   'browserRecoveryExternal', 'browserRecoveryImport', 'toggleAssets',
-  'clearPrompt',
   'downloadBadge',
-  'clearPromptDialog', 'clearPromptNever', 'clearPromptCancel', 'clearPromptConfirm',
   'currentProject',
   'currentShotContext', 'currentShotCode', 'currentShotTitle', 'currentShotMeta', 'currentShotTask', 'changeCurrentShot',
   'shotActions', 'switchShot', 'nextShot',
-  'queueAccordion', 'queueCount', 'queueAddCurrent', 'queueImportBreakdown', 'queueList', 'queueClearSent',
+  'queueAccordion', 'queueCount', 'queueImportBreakdown', 'queueList', 'queueClearSent',
   'breakdownDialog', 'breakdownClose', 'breakdownFiles', 'breakdownShots', 'breakdownImport',
   'shotDialog', 'shotDialogClose', 'shotDialogList',
 ].map(id => [id, document.getElementById(id)]));
@@ -140,8 +138,8 @@ function loadWorkspace() {
     if (savedPanel && typeof savedPanel === 'object') {
       state.assetPanel = {
         open: savedPanel.open !== false,
-        // 旧版浮层开关会被页面点击覆盖；升级时重置为不遮挡的并排布局一次。
-        layout: savedPanel.layoutVersion === ASSET_LAYOUT_VERSION && savedPanel.layout === 'overlay' ? 'overlay' : 'push',
+        // 升级时改用按需浮窗；此后仍记住用户主动选择的并排方式。
+        layout: savedPanel.layoutVersion === ASSET_LAYOUT_VERSION && savedPanel.layout === 'push' ? 'push' : 'overlay',
         layoutVersion: ASSET_LAYOUT_VERSION,
         width: Number.isFinite(Number(savedPanel.width))
           ? Math.max(360, Math.min(760, Math.round(Number(savedPanel.width))))
@@ -201,7 +199,7 @@ function saveWorkspace(immediate = false) {
 /* 提示词历史：编辑停顿 6 秒后落一版快照，最多保留 20 版 */
 let historyTimer = null;
 function pushHistorySnapshotNow() {
-  const body = el.promptEditor.value;
+  const body = state.prompts[state.mode];
   const list = state.history[state.mode];
   if (list[0] && list[0].body === body) return;
   list.unshift({ at: Date.now(), body });
@@ -269,16 +267,11 @@ function effectiveServiceForMode(mode) {
 }
 
 function renderMode() {
-  const copy = MODE_COPY[state.mode];
   document.body.dataset.mode = state.mode;
   document.title = `${state.mode === 'image' ? '图片' : '视频'}创作浏览器｜视频制作 OS`;
   document.querySelectorAll('.mode-button').forEach(button => {
     button.setAttribute('aria-pressed', String(button.dataset.mode === state.mode));
   });
-  el.promptModeLabel.textContent = copy.label;
-  el.promptEditor.placeholder = copy.placeholder;
-  el.promptEditor.value = state.prompts[state.mode];
-  updateCharacterCount();
   renderPlatforms();
   renderPromptTemplates();
   renderQueue();
@@ -293,8 +286,46 @@ function renderProject() {
   const project = state.config?.project;
   const label = project?.name || (state.projectId === 'inspiration' ? '灵感生成' : '当前剧本');
   el.currentProject.textContent = `${label} ⌄`;
-  el.currentProject.title = `当前：${label}。点击切换剧本`;
-  el.currentProject.setAttribute('aria-label', `当前剧本：${label}，点击切换`);
+  el.currentProject.title = `当前：${label}。下拉快速切换剧本`;
+  el.currentProject.setAttribute('aria-label', `当前剧本：${label}，下拉选择其他剧本`);
+}
+
+let projectChangeTask = Promise.resolve();
+let projectMenuOpen = false;
+
+function queueProjectChange(project) {
+  projectChangeTask = projectChangeTask.catch(() => {}).then(() => applyProjectChange(project));
+  return projectChangeTask;
+}
+
+async function openProjectMenu() {
+  if (projectMenuOpen) return;
+  if (typeof API.showProjectMenu !== 'function') {
+    showToast('请完全退出并重新打开更新后的 Mac 版，以启用剧本下拉菜单');
+    return;
+  }
+  projectMenuOpen = true;
+  closePlatformPopover();
+  el.currentProject.setAttribute('aria-expanded', 'true');
+  try {
+    await projectChangeTask.catch(() => {});
+    saveWorkspace(true);
+    const rect = el.currentProject.getBoundingClientRect();
+    const result = await API.showProjectMenu({ mode: state.mode, x: rect.left, y: rect.bottom + 5 });
+    el.currentProject.setAttribute('aria-expanded', 'false');
+    if (result?.project) {
+      el.currentProject.setAttribute('aria-busy', 'true');
+      // Also handle the invoke result; queuing makes it safe if the project event arrived first.
+      await queueProjectChange(result.project);
+    }
+    if (!result?.manage) el.currentProject.focus({ preventScroll: true });
+  } catch (error) {
+    showToast(`切换剧本失败：${error.message}`);
+  } finally {
+    projectMenuOpen = false;
+    el.currentProject.setAttribute('aria-expanded', 'false');
+    el.currentProject.removeAttribute('aria-busy');
+  }
 }
 
 async function applyProjectChange(project) {
@@ -620,103 +651,108 @@ function copyTextToClipboard(text) {
   });
 }
 
-function usePromptTemplate(item) {
-  // 载入前先把当前草稿落一版本机快照，避免长提示词被模板静默覆盖后无处找回。
-  let snapshotted = false;
-  if (el.promptEditor.value.trim() && el.promptEditor.value !== item.body) {
-    pushHistorySnapshotNow();
-    snapshotted = true;
-  }
-  state.prompts[state.mode] = item.body;
-  el.promptEditor.value = item.body;
-  updateCharacterCount();
-  saveWorkspace(true);
-  showToast(`已载入「${item.title}」${snapshotted ? '；原内容已存本机快照' : ''}`);
-}
-
 const expandedTemplates = new Set();
-
+const templateDrafts = new Map();
+const activeTemplateIds = { image: '', video: '' };
+function rememberTemplatePrompt(body, mode = state.mode) {
+  if (state.prompts[mode] === body) return;
+  if (mode === state.mode) pushHistorySnapshotNow();
+  state.prompts[mode] = body;
+  saveWorkspace(true);
+}
 function renderPromptTemplates() {
-  const items = state.promptTemplates[state.mode];
-  el.promptAccordionCount.textContent = `${items.length} 条`;
+  const mode = state.mode;
+  const items = state.promptTemplates[mode];
+  el.promptAccordionCount.textContent = items.length + ' 条';
   el.promptTemplateList.replaceChildren();
   if (!items.length) {
     const empty = document.createElement('div');
     empty.className = 'material-empty';
     empty.textContent = '暂无固定提示词';
-    el.promptTemplateList.appendChild(empty);
-    return;
+    el.promptTemplateList.append(empty);
   }
   for (const item of items) {
+    const key = mode + ':' + item.id;
+    const draft = templateDrafts.get(key) || item;
     const row = document.createElement('div');
     row.className = 'saved-template-item' + (expandedTemplates.has(item.id) ? ' expanded' : '');
     row.dataset.templateId = item.id;
-    const use = document.createElement('button');
-    use.type = 'button';
-    use.className = 'saved-template-use';
-    use.title = '点击展开或收起完整内容';
-    use.setAttribute('aria-expanded', String(expandedTemplates.has(item.id)));
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'saved-template-use';
+    toggle.title = '展开编辑标题和正文';
+    toggle.setAttribute('aria-expanded', String(expandedTemplates.has(item.id)));
     const name = document.createElement('strong');
-    name.textContent = item.title;
+    name.textContent = draft.title;
     const preview = document.createElement('span');
-    preview.textContent = item.body.replace(/\s+/g, ' ').slice(0, 54);
-    use.append(name, preview);
-    // 点击只展开/收起全文；载入走展开区里的按钮，避免误覆盖正在编辑的提示词。
-    use.addEventListener('click', () => {
+    preview.textContent = draft.body.replace(/\s+/g, ' ').slice(0, 54);
+    toggle.append(name, preview);
+    toggle.addEventListener('click', () => {
+      activeTemplateIds[mode] = item.id;
       if (expandedTemplates.has(item.id)) expandedTemplates.delete(item.id);
       else expandedTemplates.add(item.id);
       renderPromptTemplates();
     });
-    row.appendChild(use);
     const remove = document.createElement('button');
-    remove.type = 'button';
-    remove.className = 'template-delete';
-    remove.setAttribute('aria-label', `删除固定提示词 ${item.title}`);
-    remove.textContent = '×';
+    remove.type = 'button'; remove.className = 'template-delete'; remove.textContent = '×';
+    remove.setAttribute('aria-label', '删除固定提示词 ' + item.title);
     remove.addEventListener('click', () => {
-      if (!confirm(`删除固定提示词「${item.title}」？`)) return;
-      expandedTemplates.delete(item.id);
-      state.promptTemplates[state.mode] = state.promptTemplates[state.mode].filter(candidate => candidate.id !== item.id);
-      saveWorkspace(true);
-      renderPromptTemplates();
+      if (!confirm('删除固定提示词「' + item.title + '」？')) return;
+      state.promptTemplates[mode] = items.filter(candidate => candidate.id !== item.id);
+      templateDrafts.delete(key); expandedTemplates.delete(item.id);
+      if (activeTemplateIds[mode] === item.id) activeTemplateIds[mode] = '';
+      saveWorkspace(true); renderPromptTemplates();
     });
-    row.appendChild(remove);
+    row.append(toggle, remove);
     if (expandedTemplates.has(item.id)) {
-      const body = document.createElement('div');
-      body.className = 'saved-template-body';
-      const text = document.createElement('div');
-      text.className = 'saved-template-text';
-      text.textContent = item.body;
-      const load = document.createElement('button');
-      load.type = 'button';
-      load.className = 'secondary-action saved-template-load';
-      load.textContent = '载入到编辑器';
-      load.addEventListener('click', () => {
-        usePromptTemplate(item);
-        expandedTemplates.delete(item.id);
-        renderPromptTemplates();
-      });
-      const copy = document.createElement('button');
-      copy.type = 'button';
-      copy.className = 'secondary-action saved-template-load saved-template-copy';
-      copy.textContent = '复制';
-      copy.title = '复制全文，不改动编辑器当前内容';
-      copy.addEventListener('click', async () => {
-        try {
-          await copyTextToClipboard(item.body);
-          showToast(`已复制「${item.title}」`);
-        } catch {
-          showToast('复制失败，请手动选择文本');
+      const body = document.createElement('div'); body.className = 'saved-template-body';
+      const title = document.createElement('input');
+      title.type = 'text'; title.maxLength = 40; title.className = 'saved-template-title-input';
+      title.setAttribute('aria-label', '固定提示词标题'); title.value = draft.title;
+      const text = document.createElement('textarea');
+      text.className = 'saved-template-text'; text.spellcheck = false;
+      text.setAttribute('aria-label', '固定提示词正文'); text.value = draft.body;
+      const actions = document.createElement('div'); actions.className = 'saved-template-actions';
+      const button = (label, handler, primary = false) => {
+        const b = document.createElement('button'); b.type = 'button'; b.textContent = label;
+        b.className = (primary ? 'primary-action' : 'secondary-action') + ' saved-template-load';
+        b.addEventListener('click', handler); actions.append(b); return b;
+      };
+      const save = button('保存修改', () => {
+        if (!title.value.trim() || !text.value.trim()) {
+          showToast('请填写标题和提示词内容');
+          (!title.value.trim() ? title : text).focus(); return;
         }
+        item.title = title.value.trim(); item.body = text.value.trim(); item.updatedAt = Date.now();
+        templateDrafts.delete(key); saveWorkspace(true); renderPromptTemplates();
+        showToast('标题和提示词已保存');
+      }, true);
+      save.disabled = !templateDrafts.has(key);
+      for (const input of [title, text]) {
+        input.addEventListener('focus', () => { activeTemplateIds[mode] = item.id; });
+        input.addEventListener('input', () => {
+          activeTemplateIds[mode] = item.id;
+          templateDrafts.set(key, { title: title.value, body: text.value });
+          save.disabled = title.value === item.title && text.value === item.body;
+        });
+      }
+      button('复制', async () => {
+        if (!text.value.trim()) { showToast('提示词为空'); return; }
+        try {
+          await copyTextToClipboard(text.value);
+          activeTemplateIds[mode] = item.id; rememberTemplatePrompt(text.value, mode);
+          showToast('提示词已复制');
+        } catch { showToast('复制失败，请手动选择文本'); }
       });
-      const actions = document.createElement('div');
-      actions.className = 'saved-template-actions';
-      actions.append(load, copy);
-      body.append(text, actions);
-      row.appendChild(body);
+      button('加入队列', () => {
+        if (!addQueueItem(text.value)) { showToast('提示词为空，或相同内容已在队列里'); return; }
+        rememberTemplatePrompt(text.value, mode); renderQueue(); showToast('已加入提示词队列');
+      });
+      body.append(title, text, actions); row.append(body);
     }
-    el.promptTemplateList.appendChild(row);
+    el.promptTemplateList.append(row);
   }
+  queueBoundsUpdate();
 }
 
 function collectAssetItems(root) {
@@ -731,7 +767,7 @@ function collectAssetItems(root) {
       for (const child of node.children || []) walk(child, depth + 1, path);
       return;
     }
-    if (node.kind === 'file' && ['image', 'video'].includes(node.type)) {
+    if (node.kind === 'file' && ['image', 'video', 'audio'].includes(node.type)) {
       items.push({ ...node, folderPath: parentPath || '' });
     }
   };
@@ -822,9 +858,9 @@ async function importLocalFilesToFolder(files, folderPath) {
     }
     return;
   }
-  const list = [...files].filter(file => /\.(png|jpe?g|webp|gif|bmp|avif|mp4|mov|webm|mkv|avi|m4v)$/i.test(file.name));
+  const list = [...files].filter(file => /\.(png|jpe?g|webp|gif|bmp|avif|mp4|mov|webm|mkv|avi|m4v|mp3|wav|m4a|aac|flac|ogg|opus|wma|aiff|aif|amr|ape)$/i.test(file.name));
   if (!list.length) {
-    showToast('没有可导入的图片或视频');
+    showToast('没有可导入的图片、视频或音频');
     return;
   }
   let imported = 0;
@@ -868,7 +904,11 @@ function toggleQuickFolder(row, folder) {
   if (disclosure) {
     disclosure.classList.toggle('expanded', !collapsing);
     disclosure.setAttribute('aria-expanded', String(!collapsing));
+    const label = `${collapsing ? '展开' : '收起'}${folder.depth ? folder.node.name : '全部资产'}`;
+    disclosure.setAttribute('aria-label', label);
+    disclosure.title = label;
   }
+  row.querySelector('.quick-folder-name')?.setAttribute('aria-expanded', String(!collapsing));
   updateQuickDropLabel();
 }
 
@@ -881,8 +921,9 @@ function updateQuickDropLabel() {
 
 function updateQuickCounts() {
   const imageCount = state.assetItems.filter(item => item.type === 'image').length;
-  const videoCount = state.assetItems.length - imageCount;
-  el.assetAccordionCount.textContent = `${imageCount} 张图片${videoCount ? ` · ${videoCount} 个视频` : ''}`;
+  const videoCount = state.assetItems.filter(item => item.type === 'video').length;
+  const audioCount = state.assetItems.filter(item => item.type === 'audio').length;
+  el.assetAccordionCount.textContent = `${imageCount} 张图片${videoCount ? ` · ${videoCount} 个视频` : ''}${audioCount ? ` · ${audioCount} 条音频` : ''}`;
 }
 
 function buildQuickFileCard(item) {
@@ -921,8 +962,14 @@ function buildQuickFileCard(item) {
   } else {
     preview = document.createElement('span');
     preview.className = 'asset-video-preview';
+    preview.dataset.mediaType = item.type;
     preview.setAttribute('aria-hidden', 'true');
-    preview.textContent = '▶';
+    const icon = document.createElement('img');
+    icon.className = 'asset-video-icon';
+    icon.src = UIIcons.src(item.type === 'video' ? 'video' : item.type === 'audio' ? 'audio' : 'document');
+    icon.alt = '';
+    icon.draggable = false;
+    preview.appendChild(icon);
   }
   const label = document.createElement('span');
   label.className = 'asset-card-label';
@@ -988,19 +1035,25 @@ function buildQuickFolderRow(folder) {
   row.className = 'quick-folder-row' + (isProjectRootFolder(state.quickAssetFolder) && folder.depth === 0 ? ' selected' : '');
   row.dataset.folderPath = key;
 
-  const disclosure = document.createElement('span');
-  disclosure.className = `quick-folder-chevron-wrap${folder.hasChildren ? '' : ' empty'}${folder.hasChildren && !collapsed ? ' expanded' : ''}`;
+  // 每个分类都能展开资产内容，不仅仅是包含下级文件夹的分类。
+  const disclosure = document.createElement('button');
+  disclosure.type = 'button';
+  disclosure.className = `quick-folder-chevron-wrap${collapsed ? '' : ' expanded'}`;
+  disclosure.setAttribute('aria-expanded', String(!collapsed));
+  disclosure.setAttribute('aria-label', `${collapsed ? '展开' : '收起'}${folder.depth ? folder.node.name : '全部资产'}`);
+  disclosure.title = disclosure.getAttribute('aria-label');
   const chevron = document.createElement('span');
   chevron.className = 'folder-chevron';
+  chevron.setAttribute('aria-hidden', 'true');
   disclosure.appendChild(chevron);
 
   const name = document.createElement('button');
   name.type = 'button';
   name.className = 'quick-folder-name';
+  name.setAttribute('aria-expanded', String(!collapsed));
   name.textContent = folder.depth ? folder.node.name : '全部资产';
   name.title = folder.depth ? `展开或收起 ${folder.node.name}` : '展开或收起全部分类';
   const toggle = () => {
-    if (!folder.hasChildren && !folder.node.fileCount) return;
     toggleQuickFolder(row, folder);
     // 根目录代表「全部资产」：导入走按类别自动归档，不作为直接落盘目标。
     if (!state.collapsedQuickFolders.has(key) && folder.depth === 0) state.quickAssetFolder = '';
@@ -1076,6 +1129,12 @@ function buildQuickFolderRow(folder) {
   }
   wrapper.appendChild(inner);
   appendQuickFolderRows(inner, state.quickFolders || [], key, new Set());
+  if (!inner.childElementCount) {
+    const empty = document.createElement('div');
+    empty.className = 'quick-folder-empty-hint';
+    empty.textContent = folder.node.fileCount ? '此分类暂无图片、视频或音频' : '暂无资产';
+    inner.appendChild(empty);
+  }
   row.dataset.wrapperReady = '1';
   return { row, wrapper };
 }
@@ -1859,31 +1918,16 @@ function renderDownloads() {
   restoreDownloadFocus(focusTarget);
 }
 
-function updateCharacterCount() {
-  el.characterCount.textContent = `${el.promptEditor.value.length} 字`;
-}
-
-async function copyEditorText(editor, { focusBrowser = false, emptyMessage = '当前提示词为空', successMessage = '提示词已复制' } = {}) {
-  const text = editor.value.trim();
-  if (!text) {
-    showToast(emptyMessage);
-    return;
-  }
-  let copied = false;
-  try {
-    await navigator.clipboard.writeText(text);
-    copied = true;
-  } catch {
-    editor.focus();
-    editor.select();
-    copied = document.execCommand('copy');
-  }
-  if (focusBrowser) await API.focusBrowser();
-  showToast(copied ? (focusBrowser ? `${successMessage}，可直接粘贴到右侧网页` : successMessage) : '复制失败，请手动复制');
-}
-
 async function copyPrompt(focusBrowser) {
-  return copyEditorText(el.promptEditor, { focusBrowser });
+  const item = state.promptTemplates[state.mode].find(item => item.id === activeTemplateIds[state.mode]);
+  if (!item) { showToast('请先展开一条固定提示词'); return; }
+  const body = templateDrafts.get(state.mode + ':' + item.id)?.body ?? item.body;
+  if (!body.trim()) { showToast('提示词为空'); return; }
+  try {
+    await copyTextToClipboard(body); rememberTemplatePrompt(body);
+    if (focusBrowser) await API.focusBrowser();
+    showToast(focusBrowser ? '已复制，可粘贴到右侧网页' : '提示词已复制');
+  } catch { showToast('复制失败，请手动选择文本'); }
 }
 
 async function selectService(serviceId) {
@@ -1920,7 +1964,6 @@ async function selectService(serviceId) {
 async function setMode(mode) {
   if (state.modeSwitchPending) return false;
   const nextMode = mode === 'video' ? 'video' : 'image';
-  state.prompts[state.mode] = el.promptEditor.value;
   return restoreModeBrowser(nextMode);
 }
 
@@ -2154,7 +2197,7 @@ async function importDownloadedFiles() {
 
 async function importLocalAssets() {
   if (typeof API?.importAssets !== 'function') {
-    showToast('请更新桌面版后添加图片或视频');
+    showToast('请更新桌面版后添加图片、视频或音频');
     return;
   }
   el.importLocalAssets.disabled = true;
@@ -2214,7 +2257,7 @@ async function importDroppedAssets(dataTransfer) {
   const paths = droppedLocalPaths(dataTransfer);
   const urls = droppedUrls(dataTransfer);
   if (!paths.length && !urls.length) {
-    showToast('没有识别到可导入的图片或视频');
+    showToast('没有识别到可导入的图片、视频或音频');
     return;
   }
   el.assetDropZone.classList.add('is-importing');
@@ -2328,46 +2371,6 @@ function bindEvents() {
     el.addPlatform.focus();
     queueBoundsUpdate();
   });
-  el.promptEditor.addEventListener('input', () => {
-    state.prompts[state.mode] = el.promptEditor.value;
-    updateCharacterCount();
-    saveWorkspace();
-    scheduleHistorySnapshot();
-  });
-  const doClearPrompt = () => {
-    pushHistorySnapshotNow();
-    el.promptEditor.value = '';
-    el.promptEditor.dispatchEvent(new Event('input', { bubbles: true }));
-    saveWorkspace(true);
-    showToast('已清空');
-  };
-  el.clearPrompt.addEventListener('click', () => {
-    if (!el.promptEditor.value) {
-      showToast('提示词已经是空的');
-      return;
-    }
-    if (state.skipClearConfirm) {
-      doClearPrompt();
-      return;
-    }
-    openCreatorDialog(el.clearPromptDialog);
-  });
-  el.clearPromptCancel.addEventListener('click', () => el.clearPromptDialog.close());
-  el.clearPromptDialog.addEventListener('click', event => {
-    if (event.target === el.clearPromptDialog) el.clearPromptDialog.close();
-  });
-  el.clearPromptConfirm.addEventListener('click', () => {
-    el.clearPromptDialog.close();
-    doClearPrompt();
-  });
-  el.clearPromptNever.addEventListener('click', () => {
-    state.skipClearConfirm = true;
-    saveWorkspace(true);
-    el.clearPromptDialog.close();
-    doClearPrompt();
-    showToast('今后清空将不再提醒；本机设置可随时改回');
-  });
-  el.copyPrompt.addEventListener('click', () => copyPrompt(false));
   // 固定提示词：支持不经过编辑器直接新建（内容完全由你自己填写，系统不提供任何预设）。
   el.templateCreate.addEventListener('click', () => {
     const opening = el.templateCreateForm.classList.contains('hidden');
@@ -2395,6 +2398,8 @@ function bindEvents() {
       at: Date.now(),
     });
     state.promptTemplates[state.mode] = state.promptTemplates[state.mode].slice(0, 50);
+    expandedTemplates.add(state.promptTemplates[state.mode][0].id);
+    activeTemplateIds[state.mode] = state.promptTemplates[state.mode][0].id;
     el.templateCreateForm.classList.add('hidden');
     el.templateCreateName.value = '';
     el.templateCreateBody.value = '';
@@ -2412,14 +2417,6 @@ function bindEvents() {
     state.accordions.queue = el.queueAccordion.open;
     saveWorkspace();
     queueBoundsUpdate();
-  });
-  el.queueAddCurrent.addEventListener('click', () => {
-    if (addQueueItem(el.promptEditor.value)) {
-      renderQueue();
-      showToast('已把当前提示词加入队列');
-    } else {
-      showToast('提示词为空，或相同内容已在队列里');
-    }
   });
   el.queueImportBreakdown.addEventListener('click', () => {
     openBreakdownPicker().catch(error => showToast(`拆解读取失败：${error.message}`));
@@ -2482,8 +2479,7 @@ function bindEvents() {
     el.quickFileInput.value = '';
     if (!files.length) return;
     const target = state.quickAssetFolder || '';
-    if (target && !isProjectRootFolder(target)) importLocalFilesToFolder(files, target);
-    else importLocalAssets();
+    importLocalFilesToFolder(files, target);
   });
   el.openAssetLibrary.addEventListener('click', openFullAssetLibrary);
   el.assetDropZone.addEventListener('keydown', event => {
@@ -2515,12 +2511,11 @@ function bindEvents() {
     }
     importDroppedAssets(event.dataTransfer);
   });
-  el.currentProject.addEventListener('click', () => {
-    if (typeof API.showProjectPicker !== 'function') {
-      showToast('请返回制作 OS 切换剧本');
-      return;
-    }
-    API.showProjectPicker(state.mode).catch(error => showToast(error.message));
+  el.currentProject.addEventListener('click', openProjectMenu);
+  el.currentProject.addEventListener('keydown', event => {
+    if (event.key !== 'ArrowDown') return;
+    event.preventDefault();
+    openProjectMenu();
   });
   el.showMainWindow.addEventListener('click', () => API.showMainWindow());
   el.importDownloadedFiles.addEventListener('click', importDownloadedFiles);
@@ -2596,7 +2591,7 @@ function bindEvents() {
   });
   API.onSetMode(mode => setMode(mode));
   if (typeof API.onProjectChanged === 'function') {
-    API.onProjectChanged(project => applyProjectChange(project).catch(error => showToast(`切换剧本失败：${error.message}`)));
+    API.onProjectChanged(project => queueProjectChange(project).catch(error => showToast(`切换剧本失败：${error.message}`)));
   }
   if (typeof API.onAssetPanelState === 'function') API.onAssetPanelState(applyAssetPanelState);
 
@@ -2687,13 +2682,14 @@ async function applyPendingPrompt() {
   if (state.config && ['image', 'video'].includes(payload.mode) && payload.mode !== state.mode) {
     if (!await setMode(payload.mode)) return;
   }
-  el.promptEditor.value = payload.body;
-  el.promptEditor.dispatchEvent(new Event('input', { bubbles: true }));
+  el.templateCreateName.value = String(payload.title || '导入提示词').slice(0, 40);
+  el.templateCreateBody.value = payload.body;
+  el.templateCreateForm.classList.remove('hidden');
   state.accordions.prompt = true;
   el.promptAccordion.open = true;
-  scheduleHistorySnapshot();
+  el.templateCreateName.focus();
   const source = payload.source === 'script-workbench' ? '剧本工作台' : 'Agent 经验库';
-  showToast(`已插入来自${source}的「${payload.title || '模板'}」`);
+  showToast(`已填入来自${source}的「${payload.title || '模板'}」`);
 }
 
 async function boot() {

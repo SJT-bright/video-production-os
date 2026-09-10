@@ -8,8 +8,9 @@
   <title>创作资产库｜视频制作 OS</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="creator-assets.css">
+  <link rel="stylesheet" href="assets/ui/creator/ui-icons.css">
 </head>
-<body data-ready="loading" data-layout="push">
+<body data-ready="loading" data-layout="overlay">
   <div
     class="resize-handle" id="resizeHandle" role="separator" tabindex="0"
     aria-label="调整创作资产库宽度" aria-orientation="vertical"
@@ -19,7 +20,7 @@
   <main class="asset-shell">
     <header class="asset-header">
       <div class="asset-title">
-        <span class="asset-mark" aria-hidden="true">▣</span>
+        <span class="asset-mark" data-ui-icon="library" aria-hidden="true"></span>
         <div>
           <span class="asset-breadcrumb">资产中心 / 创作资产</span>
           <strong>创作资产库</strong>
@@ -41,8 +42,8 @@
       </div>
       <div class="command-secondary">
         <div class="layout-switch" role="group" aria-label="资产库显示方式">
-          <button type="button" data-layout="push" aria-pressed="true" title="网页和资产库并排显示，互不遮挡">并排</button>
-          <button type="button" data-layout="overlay" aria-pressed="false" title="临时覆盖网页，点击网页后收起">浮层</button>
+          <button type="button" data-layout="overlay" aria-pressed="true" title="不占网页宽度；点击网页退到后面，再点创作资产恢复">浮窗</button>
+          <button type="button" data-layout="push" aria-pressed="false" title="网页和资产库并排显示，互不遮挡">并排</button>
         </div>
         <button class="quiet-button" id="openLibrary" type="button">Finder</button>
       </div>
@@ -202,6 +203,7 @@
   </dialog>
 
   <div class="asset-toast" id="assetToast" role="status" aria-live="polite"></div>
-  <script src="creator-assets.js"></script>
+  <script src="assets/ui/creator/ui-icons.js"></script>
+<script src="creator-assets.js"></script>
 </body>
 </html>

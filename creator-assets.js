@@ -6,13 +6,19 @@ const PANEL_COMPACT_WIDTH = 520;
 const PANEL_EXPANDED_WIDTH = 720;
 const RENDER_BATCH = 120;
 const TYPE_COPY = Object.freeze({ image: '图片', audio: '音频', video: '视频', document: '文档', other: '其他' });
-const TYPE_GLYPH = Object.freeze({ image: '▧', audio: '♫', video: '▶', document: '▤', other: '◆' });
+const TYPE_ICON = Object.freeze({
+  image: UIIcons.src('image'),
+  audio: UIIcons.src('audio'),
+  video: UIIcons.src('video'),
+  document: UIIcons.src('document'),
+  other: UIIcons.src('library'),
+});
 const PREVIEW_PLACEHOLDER = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
 const SURFACE_MODE = new URLSearchParams(location.search).get('surface') === 'library' ? 'library' : 'panel';
 document.body.dataset.surface = SURFACE_MODE;
 
 function createBrowserAdapter() {
-  let panel = { open: true, layout: 'push', width: Math.max(PANEL_MIN_WIDTH, Math.min(PANEL_MAX_WIDTH, innerWidth)) };
+  let panel = { open: true, layout: 'overlay', width: Math.max(PANEL_MIN_WIDTH, Math.min(PANEL_MAX_WIDTH, innerWidth)) };
   const panelListeners = [];
   return {
     browserOnly: true,
@@ -196,7 +202,8 @@ function buildFolderRow(folder) {
   const icon = document.createElement('span');
   icon.className = 'folder-icon';
   icon.setAttribute('aria-hidden', 'true');
-  icon.textContent = folder.depth ? '→' : '▣';
+  if (folder.depth) icon.textContent = '→';
+  else icon.innerHTML = UIIcons.html('library');
   const name = document.createElement('span');
   name.className = 'folder-name';
   name.textContent = folder.depth ? folder.node.name : '全部资产';
@@ -257,6 +264,18 @@ function visibleAssets() {
   });
 }
 
+function createMediaIcon(type) {
+  const glyph = document.createElement('span');
+  glyph.className = 'media-glyph';
+  glyph.setAttribute('aria-hidden', 'true');
+  const image = document.createElement('img');
+  image.src = TYPE_ICON[type] || TYPE_ICON.other;
+  image.alt = '';
+  image.draggable = false;
+  glyph.appendChild(image);
+  return glyph;
+}
+
 function mediaPreviewNode(item) {
   if (item.type === 'image') {
     const image = document.createElement('img');
@@ -268,10 +287,7 @@ function mediaPreviewNode(item) {
   }
   const placeholder = document.createElement('span');
   placeholder.className = `media-placeholder ${item.type}`;
-  const glyph = document.createElement('span');
-  glyph.className = 'media-glyph';
-  glyph.textContent = TYPE_GLYPH[item.type] || '◆';
-  placeholder.appendChild(glyph);
+  placeholder.appendChild(createMediaIcon(item.type));
   return placeholder;
 }
 
@@ -525,9 +541,7 @@ function openPreview(item) {
   } else if (item.type === 'document') {
     const documentPreview = document.createElement('div');
     documentPreview.className = 'document-preview';
-    const glyph = document.createElement('span');
-    glyph.className = 'media-glyph';
-    glyph.textContent = TYPE_GLYPH.document;
+    const glyph = createMediaIcon('document');
     const copy = document.createElement('span');
     copy.textContent = '文档资产会保留原文件；可直接打开预览或在 Finder 中定位。';
     const link = document.createElement('a');
@@ -540,9 +554,7 @@ function openPreview(item) {
   } else {
     const otherPreview = document.createElement('div');
     otherPreview.className = 'document-preview';
-    const glyph = document.createElement('span');
-    glyph.className = 'media-glyph';
-    glyph.textContent = TYPE_GLYPH.other;
+    const glyph = createMediaIcon('other');
     const copy = document.createElement('span');
     copy.textContent = '该文件会保留在资产层级中，但当前不支持在工作台内预览。';
     otherPreview.append(glyph, copy);

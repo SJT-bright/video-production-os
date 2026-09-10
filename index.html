@@ -7,7 +7,8 @@
 <meta name="theme-color" content="#f5f5f7">
 <title>视频制作 OS</title>
 <link rel="stylesheet" href="style.css">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80'>🎬</text></svg>">
+<link rel="icon" type="image/png" href="assets/ui/creator/studio-3d-v1.png">
+  <link rel="stylesheet" href="assets/ui/creator/ui-icons.css">
 </head>
 <body>
 
@@ -21,7 +22,7 @@ FORM: 用户钉选的内容资产后台结构；参考图是已批准构图，�
 <div id="appShell">
   <aside id="sidebar" aria-label="视频制作 OS 主导航">
     <div class="side-brand">
-      <span class="brand-mark" aria-hidden="true">V</span>
+      <span class="brand-mark" data-ui-icon="studio" aria-hidden="true"></span>
       <span class="brand-copy"><b>视频制作 OS</b></span>
     </div>
     <nav id="sideNav" class="side-nav" aria-label="功能目录"></nav>
@@ -85,7 +86,7 @@ FORM: 用户钉选的内容资产后台结构；参考图是已批准构图，�
 
     <div class="script-chooser-body">
       <button id="inspirationProject" class="script-entry-row inspiration" type="button">
-        <span class="script-entry-symbol" aria-hidden="true">✦</span>
+        <span class="script-entry-symbol" data-ui-icon="sparkle" aria-hidden="true"></span>
         <span class="script-entry-copy">
           <strong>灵感生成</strong>
           <small>在独立灵感工作区自由探索，不会混入任何正式剧本。</small>
@@ -198,6 +199,7 @@ FORM: 用户钉选的内容资产后台结构；参考图是已批准构图，�
 <div id="toast" class="hidden" role="status" aria-live="polite" aria-atomic="true"></div>
 
 <script src="vendor/marked.min.js"></script>
+<script src="assets/ui/creator/ui-icons.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

@@ -141,7 +141,7 @@ let activeMode = 'image';
 let activeTabId = null;
 let tabSequence = 0;
 let browserBounds = { x: 410, y: 112, width: 900, height: 700 };
-let assetPanelState = { open: false, layout: 'push', width: 520 };
+let assetPanelState = { open: false, layout: 'overlay', width: 520 };
 let downloadSequence = 0;
 
 // 多开标签：同一平台可以同时开多个网页（例如多个 GPT 窗口批量出图），
@@ -752,13 +752,13 @@ async function importExternalDownloads(mode) {
 async function importLocalCreativeAssets() {
   if (!creatorWindow || creatorWindow.isDestroyed()) throw new Error('创作浏览器尚未打开');
   const selection = await dialog.showOpenDialog(creatorWindow, {
-    title: '添加图片或视频到当前剧本',
+    title: '添加图片、视频或音频到当前剧本',
     buttonLabel: '添加到创作资产',
     properties: ['openFile', 'multiSelections'],
-    filters: [{ name: '图片与视频', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'avif', 'mp4', 'mov', 'webm', 'mkv', 'avi', 'm4v'] }],
+    filters: [{ name: '图片、视频与音频', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'avif', 'mp4', 'mov', 'webm', 'mkv', 'avi', 'm4v', 'mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus', 'wma', 'aiff', 'aif', 'amr', 'ape'] }],
   });
   if (selection.canceled || !selection.filePaths.length) return { cancelled: true, imported: 0, failed: [] };
-  return archiveExternalPaths(selection.filePaths, new Set(['image', 'video']));
+  return archiveExternalPaths(selection.filePaths, new Set(['image', 'video', 'audio']));
 }
 
 function isPrivateRemoteHost(hostname) {
@@ -844,7 +844,7 @@ async function saveRemoteImageBuffer(buffer, sourceUrl, mimeType) {
 async function importDroppedCreativeAssets(payload = {}) {
   const paths = Array.isArray(payload.paths) ? payload.paths.map(value => String(value || '')).filter(Boolean).slice(0, 100) : [];
   const urls = Array.isArray(payload.urls) ? payload.urls.map(value => String(value || '')).filter(Boolean).slice(0, 20) : [];
-  const local = await archiveExternalPaths(paths, new Set(['image', 'video']));
+  const local = await archiveExternalPaths(paths, new Set(['image', 'video', 'audio']));
   const failed = [...local.failed];
   let imported = local.imported;
   for (const url of urls) {
@@ -1777,6 +1777,67 @@ function registerIpc() {
     mainWindow.show();
     mainWindow.focus();
     return true;
+  });
+
+  ipcMain.handle('creator:show-project-menu', async (event, payload = {}) => {
+    requireTrusted(event, 'creator');
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('剧本菜单参数无效');
+    const owner = creatorWindow;
+    if (!owner || owner.isDestroyed()) return { cancelled: true };
+    const projects = creativeProjectStore.list();
+    const activeProjectId = creativeProjectStore.active()?.id;
+    const mode = modeOrDefault(payload.mode);
+    const zoom = event.sender.getZoomFactor();
+    const [width, height] = owner.getContentSize();
+    const x = Number.isFinite(payload.x) ? Math.max(0, Math.min(width - 1, Math.round(payload.x * zoom))) : 0;
+    const y = Number.isFinite(payload.y) ? Math.max(0, Math.min(height - 1, Math.round(payload.y * zoom))) : 74;
+    const selection = await new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = value => {
+        if (settled) return;
+        settled = true;
+        owner.removeListener('closed', onClosed);
+        resolve(value);
+      };
+      const onClosed = () => finish(null);
+      owner.once('closed', onClosed);
+      try {
+        const menu = Menu.buildFromTemplate([
+          { label: '快速切换剧本', enabled: false },
+          { type: 'separator' },
+          ...projects.map(project => ({
+            label: project.name + (project.available === false ? '（目录不可用）' : ''),
+            type: 'radio',
+            checked: project.id === activeProjectId,
+            enabled: project.available !== false,
+            click: () => finish({ projectId: project.id }),
+          })),
+          { type: 'separator' },
+          { label: '新建或管理剧本…', click: () => finish({ manage: true }) },
+        ]);
+        menu.popup({
+          window: owner, x, y,
+          // Let the selected item's click arrive before treating dismissal as cancel.
+          callback: () => setImmediate(() => finish(null)),
+        });
+      } catch (error) {
+        owner.removeListener('closed', onClosed);
+        reject(error);
+      }
+    });
+    if (!selection || owner.isDestroyed()) return { cancelled: true };
+    if (selection.manage) {
+      if (!mainWindow || mainWindow.isDestroyed()) await createMainWindow();
+      mainWindow.show();
+      mainWindow.focus();
+      mainWindow.webContents.send('os:open-project-picker', { mode });
+      return { manage: true };
+    }
+    if (selection.projectId === creativeProjectStore.active()?.id) {
+      return { ok: true, unchanged: true, project: creativeProjectStore.active() };
+    }
+    // Reuse the existing project transition; keep browser tabs and login sessions alive.
+    return createCreatorWindow({ mode, projectId: selection.projectId });
   });
 
   ipcMain.handle('creator:show-project-picker', async (event, mode) => {

@@ -44,6 +44,7 @@ contextBridge.exposeInMainWorld('creatorAPI', Object.freeze({
   focusBrowser: () => ipcRenderer.invoke('creator:focus-browser'),
   showMainWindow: () => ipcRenderer.invoke('creator:show-main-window'),
   showProjectPicker: mode => ipcRenderer.invoke('creator:show-project-picker', mode),
+  showProjectMenu: options => ipcRenderer.invoke('creator:show-project-menu', options),
   getDownloads: () => ipcRenderer.invoke('creator:get-downloads'),
   onBrowserState: callback => subscribe('creator:browser-state', callback),
   onDownload: callback => subscribe('creator:download', callback),

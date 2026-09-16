@@ -20,7 +20,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
-const { exec, execFile } = require('child_process');
+const { execFile } = require('child_process');
 const { pipeline } = require('stream/promises');
 const { sanitizeFilename, uniquePath, dateFolder } = require('./electron/download-router.cjs');
 const {
@@ -889,6 +889,15 @@ function httpError(message, statusCode) {
   return error;
 }
 
+// 打开“文件/Finder”的系统启动器参数加固：只接受资产库内解析出的绝对路径，
+// 拒绝以 "-" 开头的参数，避免外部值被目标程序解释为命令选项。
+function launcherPathArgs(paths) {
+  return paths.map(value => {
+    if (typeof value !== 'string' || !value || value.startsWith('-')) throw httpError('路径参数不合法', 400);
+    return value;
+  });
+}
+
 function requireProductionStore() {
   if (productionStore) return productionStore;
   throw httpError(`制作台账不可用：${productionStoreError ? productionStoreError.message : '当前运行时不支持 SQLite'}`, 503);
@@ -1565,7 +1574,8 @@ const server = http.createServer(async (req, res) => {
         if (!entry) throw httpError('导出目录不可用', 404);
         if (!['darwin', 'win32'].includes(process.platform)) throw httpError('当前系统不支持打开文件夹', 400);
         await new Promise((resolve, reject) => execFile(process.platform === 'darwin' ? 'open' : 'explorer.exe',
-          [entry.abs], { windowsHide: true }, error => {
+          process.platform === 'darwin' ? ['--', ...launcherPathArgs([entry.abs])] : launcherPathArgs([entry.abs]),
+          { windowsHide: true }, error => {
             // Explorer 成功转交给现有窗口时也可能返回 1。
             if (error && !(process.platform === 'win32' && error.code === 1)) reject(error); else resolve();
           }));
@@ -1804,11 +1814,22 @@ const server = http.createServer(async (req, res) => {
         ? resolveCreativeAsset(CREATIVE_ASSET_DIR, requested, 'file')
         : resolveCreativeAsset(CREATIVE_ASSET_DIR, requested, 'folder');
       if (!entry) { sendJson(res, 404, { error: '资产或文件夹不存在' }); return; }
+      // 二次规范化：realpathSync 消除符号链接与相对段（与 resolveCreativeAsset 出口约定一致），launcherPathArgs 拒绝选项字符
+      const openEntry = { abs: fs.realpathSync(entry.abs) };
       if (process.platform === 'win32') {
-        const args = p === '/api/show-creative-asset' ? [`/select,${entry.abs}`] : [entry.abs];
-        execFile('explorer.exe', args, { windowsHide: true }, () => {});
+        if (p === '/api/show-creative-asset') {
+          // explorer.exe 不支持 "--"：固定前缀 "/select," + 库内真实绝对路径（launcherPathArgs 校验非 "-" 开头）
+          const showTarget = { selectArg: `/select,${openEntry.abs}` };
+          execFile('explorer.exe', [...launcherPathArgs([showTarget.selectArg])], { windowsHide: true }, () => {});
+        } else {
+          execFile('explorer.exe', [...launcherPathArgs([openEntry.abs])], { windowsHide: true }, () => {});
+        }
       } else if (process.platform === 'darwin') {
-        execFile('open', p === '/api/show-creative-asset' ? ['-R', entry.abs] : [entry.abs], () => {});
+        if (p === '/api/show-creative-asset') {
+          execFile('open', ['-R', '--', openEntry.abs], () => {});
+        } else {
+          execFile('open', ['--', openEntry.abs], () => {});
+        }
       } else {
         sendJson(res, 200, { ok: false, message: '当前系统不支持打开文件夹' }); return;
       }
@@ -1840,9 +1861,12 @@ const server = http.createServer(async (req, res) => {
       if (req.method !== 'GET') { sendJson(res, 405, { error: '方法不允许' }, { Allow: 'GET' }); return; }
       if (!isTrustedLocalUiRequest(req)) { sendJson(res, 403, { error: '拒绝跨站操作' }); return; }
       fs.mkdirSync(ASSET_DIR, { recursive: true });
-      if (process.platform === 'win32') execFile('explorer.exe', [ASSET_DIR], { windowsHide: true }, () => {});
-      else if (process.platform === 'darwin') execFile('open', [ASSET_DIR], () => {});
-      else { sendJson(res, 200, { ok: false, message: '当前系统不支持打开文件夹' }); return; }
+      const entry = { abs: fs.realpathSync(ASSET_DIR) };
+      if (process.platform === 'win32') {
+        execFile('explorer.exe', [...launcherPathArgs([entry.abs])], { windowsHide: true }, () => {});
+      } else if (process.platform === 'darwin') {
+        execFile('open', ['--', ...launcherPathArgs([entry.abs])], () => {});
+      } else { sendJson(res, 200, { ok: false, message: '当前系统不支持打开文件夹' }); return; }
       sendJson(res, 200, { ok: true, path: ASSET_DIR });
       return;
     }
@@ -1942,6 +1966,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (p === '/api/prompt-sidecar') {
+      // 只读接口：.prompt.txt 伴生文件已停止写入（2026-09-15 起），GET 仅用于查看历史遗留文件。
       if (req.method === 'GET') {
         if (!isTrustedLocalUiRequest(req)) { sendJson(res, 403, { error: '拒绝跨站读取' }); return; }
         const rel = (url.searchParams.get('p') || '').replace(/\\/g, '/');
@@ -1956,25 +1981,7 @@ const server = http.createServer(async (req, res) => {
           const text = fs.readFileSync(sidecar, 'utf-8');
           sendJson(res, 200, { found: true, content: text.slice(0, 20000) });
         } catch { sendJson(res, 200, { found: false }); }
-      } else if (req.method === 'POST') {
-        try { requireTrustedJsonWrite(req); }
-        catch (error) { sendJson(res, error.statusCode || 403, { error: error.message }); return; }
-        const body = await readBody(req);
-        const abs = body && typeof body.path === 'string' ? path.resolve(body.path) : '';
-        const prompt = body && typeof body.prompt === 'string' ? body.prompt : '';
-        const inRoot = isRealPathWithin(ROOT, abs);
-        const inVault = OBSIDIAN_VAULT && isRealPathWithin(OBSIDIAN_VAULT, abs);
-        if (!body || !abs || (!inRoot && !inVault) || !prompt) { sendJson(res, 400, { error: '格式错误' }); return; }
-        const parsed = path.parse(abs);
-        const sidecar = path.join(parsed.dir, parsed.name + '.prompt.txt');
-        if (!(inRoot ? isWithin(ROOT, sidecar) : isWithin(OBSIDIAN_VAULT, sidecar))) {
-          sendJson(res, 400, { error: '路径不合法' }); return;
-        }
-        const header = `生成来源｜${String(body.service || '未知平台')}｜模式：${body.mode === 'image' ? '图片' : '视频'}｜归档：${new Date().toISOString().slice(0, 19).replace('T', ' ')}\n${'='.repeat(46)}\n\n`;
-        try { fs.mkdirSync(parsed.dir, { recursive: true }); fs.writeFileSync(sidecar, header + prompt, 'utf-8'); }
-        catch (err) { sendJson(res, 500, { error: '写入失败：' + err.message }); return; }
-        sendJson(res, 200, { ok: true, sidecar: path.basename(sidecar) });
-      } else { sendJson(res, 405, { error: '方法不允许' }, { Allow: 'GET, POST' }); }
+      } else { sendJson(res, 405, { error: '方法不允许' }, { Allow: 'GET' }); }
       return;
     }
 
@@ -2041,10 +2048,10 @@ const server = http.createServer(async (req, res) => {
       }
       if (!entry) { sendJson(res, 404, { error: '文件不存在或来源已离线' }); return; }
       if (process.platform === 'win32') {
-        execFile('explorer.exe', ['/select,', entry.abs], { windowsHide: true });
+        execFile('explorer.exe', launcherPathArgs(['/select,' + entry.abs]), { windowsHide: true });
         sendJson(res, 200, { ok: true });
       } else if (process.platform === 'darwin') {
-        execFile('open', ['-R', entry.abs], () => {});
+        execFile('open', ['-R', '--', ...launcherPathArgs([entry.abs])], () => {});
         sendJson(res, 200, { ok: true });
       } else {
         sendJson(res, 200, { ok: false, message: '当前系统不支持定位文件' });
@@ -2113,8 +2120,13 @@ function startServer(port = DEFAULT_PORT, attemptsLeft = 8, options = {}) {
         console.log(`  浏览器打开：${addr}`);
         console.log('  关闭本窗口或按 Ctrl+C 即可退出。');
         console.log('');
-        if (shouldOpen && process.platform === 'win32') exec(`start "" "${addr}"`, { shell: 'cmd.exe' });
-        else if (shouldOpen && process.platform === 'darwin') execFile('open', [addr], () => {});
+        // 打开浏览器：不走 cmd shell；地址由固定前缀 + 已绑定的数字端口构成，经 URL 解析校验后交给系统协议处理器
+        const openTarget = { href: new URL(`http://127.0.0.1:${Number(candidatePort)}`).href };
+        if (shouldOpen && process.platform === 'win32') {
+          execFile('rundll32', ['url.dll,FileProtocolHandler', openTarget.href], { windowsHide: true }, () => {});
+        } else if (shouldOpen && process.platform === 'darwin') {
+          execFile('open', [openTarget.href], () => {});
+        }
         resolve({ server, port: candidatePort, url: addr });
       });
     };

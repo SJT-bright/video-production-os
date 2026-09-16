@@ -113,7 +113,7 @@ async function run() {
     await page.addInitScript(() => {
       const listeners = { panel: [], drag: [] };
       let panel = { open: true, layout: 'overlay', width: 520, creativeAssetAvailable: true };
-      window.__assetTest = { states: [], dragPaths: [], copied: [], shown: [], deleted: [], opened: 0, projectPickers: 0 };
+      window.__assetTest = { states: [], dragPaths: [], dragSelections: [], copied: [], shown: [], deleted: [], opened: 0, projectPickers: 0 };
       window.assetAPI = {
         getConfig: async () => ({ panel, project: {
           id: 'project-11111111-1111-4111-8111-111111111111', name: '校园心动', folder: '校园心动', kind: 'script',
@@ -130,6 +130,11 @@ async function run() {
         startDrag: assetPath => {
           window.__assetTest.dragPaths.push(assetPath);
           listeners.drag.forEach(callback => callback({ ok: true, path: assetPath }));
+        },
+        // 多选整批拖出桩：记录按选入顺序的完整路径数组，并按主进程回执形状回 {ok, count, path}
+        startDragSelection: paths => {
+          window.__assetTest.dragSelections.push([...paths]);
+          listeners.drag.forEach(callback => callback({ ok: true, count: paths.length, path: paths[0] }));
         },
         copyImage: async assetPath => { window.__assetTest.copied.push(assetPath); return true; },
         showItem: async assetPath => { window.__assetTest.shown.push(assetPath); return true; },
@@ -201,6 +206,44 @@ async function run() {
     const heroCard = page.locator('.asset-card', { hasText: '女主正脸.png' });
     await heroCard.dispatchEvent('dragstart');
     assert.deepEqual(await page.evaluate(() => window.__assetTest.dragPaths), ['校园心动/人物资产/女主正脸.png']);
+
+    // 多选整批拖出：勾选两张卡后拖动其中任一选中卡 → startDragSelection 按点选顺序整批发起
+    // （Set 迭代序=点选顺序）；拖未选中的卡仍走单卡 startDrag。
+    // 说明：此处为 renderer 合成 DragEvent + preload 桩，验证的是 payload 形状契约——
+    // 主进程对 {paths} 的展开由共享 startAssetDrag 与悬浮窗测试覆盖，不等于剪映等目标应用真的收到素材。
+    await heroCard.hover();
+    await heroCard.locator('.asset-check').click();
+    const batchCard = page.locator('.asset-card', { hasText: '校服三视图.jpg' });
+    await batchCard.hover();
+    await batchCard.locator('.asset-check').click();
+    assert.match(await page.locator('#selectionCount').textContent(), /已选 2 项/);
+    await heroCard.dispatchEvent('dragstart');
+    assert.deepEqual(await page.evaluate(() => window.__assetTest.dragSelections.at(-1)), [
+      '校园心动/人物资产/女主正脸.png', '校园心动/人物资产/校服三视图.jpg',
+    ], '整批拖出应按点选顺序携带全部选中路径');
+    assert.equal(await page.evaluate(() => window.__assetTest.dragPaths.length), 1, '整批拖出不得再触发单卡 startDrag');
+    assert.match(await page.locator('#assetStatus').textContent(), /已开始拖拽 2 项，松手放入目标窗口/, '拖出回执应诚实措辞并带整批数量');
+
+    // 未选中卡拖出 = 单卡语义不变：dragPaths 新增该路径，不触发整批
+    // （筛选点击会把 renderLimit 重置回 120，按 mtime 降序批量资产-001 不在首批，选用必在首批的批量资产-060）
+    const bulkCard = page.locator('.asset-card', { hasText: '批量资产-060.png' });
+    await bulkCard.hover();
+    await bulkCard.dispatchEvent('dragstart');
+    assert.equal(await page.evaluate(() => window.__assetTest.dragPaths.at(-1)), '校园心动/人物资产/批量资产-060.png', '未选中卡拖出仍是单卡路径');
+    assert.equal(await page.evaluate(() => window.__assetTest.dragSelections.length), 1, '未选中卡拖出不得触发整批');
+
+    // SSE 式后台刷新（creative-assets → scheduleLibraryReload → loadLibrary）不得清空正在攒的多选：
+    // 交集守卫应原样保留仍存在的选中路径、选择栏与卡片选中态。
+    // （资产被删除导致的失效收缩走同一交集分支：不在新树中的路径被剔除并 toast
+    // 「已自动移除 N 个失效选项」，此处以“全部存活”为主证，收缩路径由交集逻辑同源覆盖。）
+    await page.evaluate(() => scheduleLibraryReload());
+    await page.waitForFunction(() => /选中分类即可导入/.test(document.querySelector('#assetStatus')?.textContent || ''), null, { timeout: 5000 });
+    assert.match(await page.locator('#selectionCount').textContent(), /已选 2 项/, '后台刷新不得清空多选');
+    assert.equal(await page.locator('#selectionBar').isVisible(), true, '保留选择后批量操作栏应保持可见');
+    assert.equal(await page.locator('.asset-card.selected', { hasText: '女主正脸.png' }).count(), 1, '刷新后卡片选中态应保留');
+    // 清空选择，避免影响后续批量删除用例对“已选 2 项”的精确断言
+    await page.locator('#clearSelection').click();
+    assert.equal(await page.locator('#selectionBar').isHidden(), true);
     await heroCard.locator('.asset-preview-button').click();
     assert.equal(await page.locator('#previewDialog.video-review').count(), 0, '图片预览不得进入视频展开审核形态');
     await page.locator('#zoomIn').click();
@@ -545,7 +588,7 @@ async function run() {
           id: 'project-11111111-1111-4111-8111-111111111111', name: '校园心动', folder: '校园心动', categories: [],
         }, rootName: '故障测试库' }),
         setPanelState: async patch => ({ open: true, layout: 'overlay', width: 520, ...patch }),
-        startDrag: () => {}, copyImage: async () => true, showItem: async () => true, openLibrary: async () => true, showProjectPicker: async () => true,
+        startDrag: () => {}, startDragSelection: () => {}, copyImage: async () => true, showItem: async () => true, openLibrary: async () => true, showProjectPicker: async () => true,
         onPanelState: () => () => {}, onDragResult: () => () => {},
       };
     });

@@ -100,7 +100,7 @@ FORM: 现有桌面工作台的 Operate 模式扩展；高密度、标准控件�
             </div>
             <textarea id="promptEditor" spellcheck="false" aria-label="当前模式提示词" placeholder="粘贴或输入提示词…"></textarea>
             <div class="prompt-actions">
-              <button class="primary-action" id="copyPrompt" type="button" title="复制提示词；⌘Enter = 复制并切到网页">复制</button>
+              <button class="text-action" id="copyPrompt" type="button" title="复制提示词；⌘Enter = 复制并切到网页">复制</button>
               <button class="text-action" id="clearPrompt" type="button">清空</button>
               <button class="text-action template-create-toggle" id="templateCreate" type="button">＋ 新建固定提示词</button>
             </div>
@@ -113,6 +113,21 @@ FORM: 现有桌面工作台的 Operate 模式扩展；高密度、标准控件�
               </div>
             </form>
             <div class="saved-template-list" id="promptTemplateList" aria-label="已保存的固定提示词"></div>
+          </div>
+        </details>
+
+        <details class="material-accordion script-accordion" id="scriptAccordion" open>
+          <summary>
+            <span class="accordion-icon script" data-ui-icon="film" aria-hidden="true"></span>
+            <span class="accordion-label"><strong>剧本</strong><small id="scriptAccordionCount">0 组</small></span>
+            <span class="accordion-chevron" aria-hidden="true"></span>
+          </summary>
+          <div class="accordion-body">
+            <div class="script-actions">
+              <button class="text-action" id="addScriptGroup" type="button">＋ 新建分组</button>
+              <span class="script-hint">拖入 txt / docx 自动导入（可按 第X集 自动拆分）· 或按 第01集 / 前10集 / 自定义名称 建组</span>
+            </div>
+            <div class="script-groups" id="scriptGroups" aria-live="polite"></div>
           </div>
         </details>
 

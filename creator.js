@@ -28,7 +28,8 @@ const state = {
   services: { image: 'gpt', video: 'updream' },
   history: { image: [], video: [] },
   promptTemplates: { image: [], video: [] },
-  accordions: { prompt: false, assets: true },
+  scripts: { groups: [] },
+  accordions: { prompt: false, scripts: true, assets: true },
   quickFolders: [],
   quickAssetFolder: '',
   collapsedQuickFolders: new Set(),
@@ -39,8 +40,7 @@ const state = {
   activeService: null,
   assetItems: [],
   downloads: new Map(),
-  promptAtStart: new Map(), // 下载开始时的提示词快照，完成后写入血缘 sidecar
-  lineageWritten: new Set(),
+  archiveNotified: new Set(),
   production: { available: false, context: null, inbox: [], stats: {} },
   browser: null,
   modeSwitchPending: false,
@@ -53,7 +53,7 @@ const el = Object.fromEntries([
   'renameDialog', 'renameForm', 'renameTitle', 'renameName', 'renameError', 'renameCancel', 'renameSave',
   'hiddenPlatforms', 'hiddenPlatformList', 'restoreAllPlatforms',
   'draftStatus',
-  'promptAccordion', 'promptAccordionCount', 'assetAccordion', 'assetAccordionCount',
+  'promptAccordion', 'promptAccordionCount', 'scriptAccordion', 'scriptAccordionCount', 'addScriptGroup', 'scriptGroups', 'assetAccordion', 'assetAccordionCount',
   'promptTemplateList',
   'templateCreate', 'templateCreateForm', 'templateCreateName', 'templateCreateBody', 'cancelTemplateCreate',
   'quickFolderTree', 'quickDropTarget', 'quickFileInput',
@@ -128,6 +128,22 @@ function loadWorkspace() {
           .slice(0, 50);
       }
     }
+    // 剧本面板按剧本项目存储：每个剧本各自的集数分组与段落内容。
+    if (project.scripts && Array.isArray(project.scripts.groups)) {
+      state.scripts = {
+        groups: project.scripts.groups
+          .filter(group => group && typeof group.id === 'string' && typeof group.name === 'string' && Array.isArray(group.items))
+          .slice(0, 200)
+          .map(group => ({
+            id: group.id,
+            name: group.name.slice(0, 60),
+            items: group.items
+              .filter(item => item && typeof item.id === 'string' && typeof item.text === 'string')
+              .slice(0, 100)
+              .map(item => ({ id: item.id, title: String(item.title || '').slice(0, 60), text: item.text.slice(0, 200000), updatedAt: Number(item.updatedAt) || 0 })),
+          })),
+      };
+    }
     if (globalTemplatesMissing) saveWorkspace(true);
     const savedPanel = global.assetPanel || legacy.assetPanel;
     if (savedPanel && typeof savedPanel === 'object') {
@@ -144,6 +160,7 @@ function loadWorkspace() {
     if (typeof global.skipClearConfirm === 'boolean') state.skipClearConfirm = global.skipClearConfirm;
     if (global.accordions && typeof global.accordions === 'object') {
       state.accordions.prompt = global.accordions.prompt === true;
+      state.accordions.scripts = global.accordions.scripts !== false;
       state.accordions.assets = global.accordions.assets !== false;
     }
     const currentPromptHasContent = !!state.prompts[state.mode].trim();
@@ -160,6 +177,9 @@ function resetProjectWorkspace() {
   state.history = { image: [], video: [] };
   // 固定提示词是全局资产，切换剧本时不清空。
   state.assetItems = [];
+  // 剧本面板按剧本项目存储：切换后由 loadWorkspace 读入新剧本的分组。
+  state.scripts = { groups: [] };
+  expandedScriptGroups.clear(); expandedScriptItems.clear();
   state.accordions.prompt = false;
   // 框选导入序列属于旧剧本：整体清空，防止把旧项目资产拖进新项目上下文。
   state.quickSelectionOrder.length = 0;
@@ -173,27 +193,36 @@ function saveWorkspace(immediate = false) {
     projectId: state.projectId,
     prompts: { ...state.prompts },
     history: { image: [...state.history.image], video: [...state.history.video] },
+    scripts: JSON.parse(JSON.stringify(state.scripts)),
   };
   const commit = () => {
-    localStorage.setItem(GLOBAL_STORAGE_KEY, JSON.stringify({
-      version: 2,
-      services: state.services,
-      assetPanel: state.assetPanel,
-      accordions: state.accordions,
-      templates: state.promptTemplates,
-      skipClearConfirm: state.skipClearConfirm,
-    }));
-    const projectKey = `${PROJECT_STORAGE_PREFIX}${snapshot.projectId}`;
-    // 保留旧版本的存储字段；已停用功能不再读取或更新，避免清掉用户历史内容。
-    let previous = {};
-    try { previous = JSON.parse(localStorage.getItem(projectKey) || '{}'); } catch {}
-    localStorage.setItem(projectKey, JSON.stringify({
-      ...previous,
-      version: 2,
-      projectId: snapshot.projectId,
-      prompts: snapshot.prompts,
-      history: snapshot.history,
-    }));
+    // localStorage 写满（超大纲剧本/素材积累）会抛 QuotaExceededError：必须接住并明确提示，不能静默丢保存
+    try {
+      localStorage.setItem(GLOBAL_STORAGE_KEY, JSON.stringify({
+        version: 2,
+        services: state.services,
+        assetPanel: state.assetPanel,
+        accordions: state.accordions,
+        templates: state.promptTemplates,
+        skipClearConfirm: state.skipClearConfirm,
+      }));
+      const projectKey = `${PROJECT_STORAGE_PREFIX}${snapshot.projectId}`;
+      // 保留旧版本的存储字段；已停用功能不再读取或更新，避免清掉用户历史内容。
+      let previous = {};
+      try { previous = JSON.parse(localStorage.getItem(projectKey) || '{}'); } catch {}
+      localStorage.setItem(projectKey, JSON.stringify({
+        ...previous,
+        version: 2,
+        projectId: snapshot.projectId,
+        prompts: snapshot.prompts,
+        history: snapshot.history,
+        scripts: snapshot.scripts,
+      }));
+    } catch (error) {
+      el.draftStatus.textContent = '保存失败：本机存储空间不足';
+      showToast('工作区保存失败：本机存储空间不足，请清理浏览器存储或拆分超大剧本');
+      return;
+    }
     el.draftStatus.textContent = '已在本机自动保存';
   };
   if (immediate) commit();
@@ -221,35 +250,6 @@ function scheduleHistorySnapshot() {
   }, 6000);
 }
 
-
-/* 下载血缘：开始时记住提示词，归档完成后写 sidecar 到素材旁边 */
-async function writeLineageSidecar(download) {
-  if (!download.savePath || !['video', 'audio', 'image'].includes(download.kind)) return 'skipped';
-  const mode = download.mode === 'video' ? 'video' : 'image';
-  const prompt = state.promptAtStart.has(download.id)
-    ? state.promptAtStart.get(download.id)
-    : state.prompts[mode] || '';
-  if (!prompt.trim()) return 'empty';
-  try {
-    const response = await fetch('/api/prompt-sidecar', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        path: download.savePath,
-        prompt,
-        service: download.serviceLabel || serviceLabel(serviceById(download.serviceId), mode),
-        mode,
-      }),
-    });
-    if (!response.ok) {
-      const data = await response.json().catch(() => null);
-      throw new Error(data?.error || `HTTP ${response.status}`);
-    }
-    return 'saved';
-  } catch (error) {
-    return `error:${error.message || '未知错误'}`;
-  }
-}
 
 function serviceById(serviceId) {
   return state.config?.services.find(service => service.id === serviceId) || null;
@@ -319,14 +319,56 @@ function clearPromptEditor() {
   showToast('已清空', { actionLabel: '撤销', onAction: undoClearPrompt });
 }
 
+/* 成就计时：视频模式下累计创作时长。窗口可见时每秒累加、每 60 秒落盘一次；
+   时长存全局 localStorage（主页总览据此解锁时间类成就），图片模式与窗口隐藏时不计时。 */
+const ACHIEVEMENT_KEY = 'videoOS.achievements.v1';
+let videoWorkTimer = null;
+let videoWorkBuffer = 0;
+
+function readAchievementState() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(ACHIEVEMENT_KEY) || '{}');
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch { return {}; }
+}
+
+function flushVideoWorkSeconds() {
+  if (videoWorkBuffer <= 0) return;
+  const saved = readAchievementState();
+  saved.videoSeconds = (Number(saved.videoSeconds) || 0) + videoWorkBuffer;
+  saved.updatedAt = Date.now();
+  try { localStorage.setItem(ACHIEVEMENT_KEY, JSON.stringify(saved)); } catch {}
+  videoWorkBuffer = 0;
+}
+
+function startVideoWorkTimer() {
+  stopVideoWorkTimer();
+  videoWorkTimer = setInterval(() => {
+    if (document.visibilityState !== 'visible') return;
+    videoWorkBuffer += 1;
+    if (videoWorkBuffer >= 60) flushVideoWorkSeconds();
+  }, 1000);
+}
+
+function stopVideoWorkTimer() {
+  if (videoWorkTimer) { clearInterval(videoWorkTimer); videoWorkTimer = null; }
+  flushVideoWorkSeconds();
+}
+
+window.addEventListener('beforeunload', flushVideoWorkSeconds);
+
 function renderMode() {
   document.body.dataset.mode = state.mode;
   document.title = `${state.mode === 'image' ? '图片' : '视频'}创作浏览器｜视频制作 OS`;
   document.querySelectorAll('.mode-button').forEach(button => {
     button.setAttribute('aria-pressed', String(button.dataset.mode === state.mode));
   });
+  // 计时只跟视频模式走：切到视频开始累计，切回图片即落盘停止。
+  if (state.mode === 'video') startVideoWorkTimer();
+  else stopVideoWorkTimer();
   renderPlatforms();
   renderPromptTemplates();
+  renderScripts();
   syncPromptEditor();
   renderQuickFolderTree();
   renderDownloads();
@@ -422,8 +464,13 @@ function tabsWithIndexes(tabs) {
   });
 }
 
-function renderPlatforms() {
-  const scrollLeft = el.platformTabs.scrollLeft;
+// 激活标签滚入可视范围：标签溢出一屏时，切换或新开网页后保证当前网页标签可见（配合滚轮横向滚动）。
+function scrollActiveTabIntoView() {
+  const active = el.platformTabs.querySelector('.platform-tab.active');
+  if (active) active.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+}
+
+function renderPlatforms() {  const scrollLeft = el.platformTabs.scrollLeft;
   el.platformTabs.replaceChildren();
   for (const tab of tabsWithIndexes(visibleTabs())) {
     const service = serviceById(tab.serviceId);
@@ -684,8 +731,487 @@ async function restoreAllPlatforms() {
   }
 }
 
+/* 剧本面板：按集数/范围命名的分组存放剧本段落，展开即可编辑与复制；按剧本项目存储。 */
+const expandedScriptGroups = new Set();
+const expandedScriptItems = new Set();
+const scriptDrafts = new Map(); // itemId -> {title, text}：编辑中的未保存草稿
+const renamingScriptGroupId = { id: '' };
+
+function scriptUid(prefix) {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function renderScripts() {
+  const groups = state.scripts.groups;
+  const totalItems = groups.reduce((sum, group) => sum + group.items.length, 0);
+  el.scriptAccordionCount.textContent = groups.length ? `${groups.length} 组 · ${totalItems} 段` : '0 组';
+  el.scriptGroups.replaceChildren();
+  if (!groups.length) {
+    const empty = document.createElement('div');
+    empty.className = 'material-empty';
+    empty.textContent = '暂无剧本分组；点上方「＋ 新建分组」，按 第01集 / 前10集 / 自定义名称 建立';
+    el.scriptGroups.append(empty);
+    return;
+  }
+  for (const group of groups) el.scriptGroups.append(buildScriptGroup(group));
+}
+
+function buildScriptGroup(group) {
+  const expanded = expandedScriptGroups.has(group.id);
+  const block = document.createElement('section');
+  block.className = 'script-group' + (expanded ? ' expanded' : '');
+  block.dataset.groupId = group.id;
+
+  const head = document.createElement('div');
+  head.className = 'script-group-head';
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'script-group-toggle';
+  toggle.setAttribute('aria-expanded', String(expanded));
+  toggle.title = expanded ? '收起这一组' : '展开这一组';
+  const name = document.createElement('strong');
+  name.textContent = group.name;
+  const meta = document.createElement('span');
+  meta.textContent = `${group.items.length} 段`;
+  toggle.append(name, meta);
+  toggle.addEventListener('click', () => {
+    if (expandedScriptGroups.has(group.id)) expandedScriptGroups.delete(group.id);
+    else expandedScriptGroups.add(group.id);
+    renderScripts();
+  });
+  head.append(toggle);
+
+  const copyAll = document.createElement('button');
+  copyAll.type = 'button';
+  copyAll.className = 'text-action';
+  copyAll.textContent = '复制全部';
+  copyAll.title = '按顺序复制这一组的全部段落';
+  copyAll.addEventListener('click', async () => {
+    const body = group.items.map(item => {
+      const draft = scriptDrafts.get(item.id);
+      return (draft ? draft.text : item.text).trim();
+    }).filter(Boolean).join('\n\n');
+    if (!body) { showToast('这一组还没有可复制的剧本内容'); return; }
+    try { await copyTextToClipboard(body); showToast(`已复制「${group.name}」全部 ${group.items.length} 段`); }
+    catch { showToast('复制失败，请重试'); }
+  });
+  head.append(copyAll);
+
+  const rename = document.createElement('button');
+  rename.type = 'button';
+  rename.className = 'text-action';
+  rename.textContent = '改名';
+  rename.addEventListener('click', () => {
+    renamingScriptGroupId.id = group.id;
+    renderScripts();
+    const input = el.scriptGroups.querySelector('.script-group-rename-input');
+    if (input) { input.focus(); input.select(); }
+  });
+  head.append(rename);
+
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'text-action script-remove';
+  remove.textContent = '删除';
+  remove.setAttribute('aria-label', `删除分组 ${group.name}`);
+  remove.addEventListener('click', () => {
+    if (!confirm(`删除分组「${group.name}」及其 ${group.items.length} 段剧本？此操作不可撤销。`)) return;
+    state.scripts.groups = state.scripts.groups.filter(candidate => candidate.id !== group.id);
+    group.items.forEach(item => { scriptDrafts.delete(item.id); expandedScriptItems.delete(item.id); });
+    expandedScriptGroups.delete(group.id);
+    saveWorkspace(true); renderScripts();
+    showToast(`已删除分组「${group.name}」`);
+  });
+  head.append(remove);
+  block.append(head);
+
+  if (renamingScriptGroupId.id === group.id) {
+    const renameRow = document.createElement('div');
+    renameRow.className = 'script-group-rename';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.maxLength = 60;
+    input.className = 'script-group-rename-input';
+    input.setAttribute('aria-label', '分组名称');
+    input.value = group.name;
+    const commit = () => {
+      const next = input.value.trim();
+      renamingScriptGroupId.id = '';
+      if (next && next !== group.name) {
+        group.name = next;
+        saveWorkspace(true);
+        showToast('分组名称已保存');
+      }
+      renderScripts();
+    };
+    input.addEventListener('keydown', event => {
+      if (event.key === 'Enter') { event.preventDefault(); commit(); }
+      if (event.key === 'Escape') { renamingScriptGroupId.id = ''; renderScripts(); }
+    });
+    const confirmRename = document.createElement('button');
+    confirmRename.type = 'button';
+    confirmRename.className = 'text-action script-save';
+    confirmRename.textContent = '保存';
+    confirmRename.addEventListener('click', commit);
+    const cancelRename = document.createElement('button');
+    cancelRename.type = 'button';
+    cancelRename.className = 'text-action';
+    cancelRename.textContent = '取消';
+    cancelRename.addEventListener('click', () => { renamingScriptGroupId.id = ''; renderScripts(); });
+    renameRow.append(input, confirmRename, cancelRename);
+    block.append(renameRow);
+  }
+
+  if (expanded) {
+    const list = document.createElement('div');
+    list.className = 'script-items';
+    if (!group.items.length) {
+      const empty = document.createElement('div');
+      empty.className = 'material-empty';
+      empty.textContent = '这一组还没有段落；点下方「＋ 新建段落」粘贴剧本';
+      list.append(empty);
+    }
+    for (const item of group.items) list.append(buildScriptItem(group, item, group.items.indexOf(item)));
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'text-action script-add-item';
+    add.textContent = '＋ 新建段落';
+    add.addEventListener('click', () => {
+      const item = { id: scriptUid('si'), title: `段落 ${group.items.length + 1}`, text: '', updatedAt: Date.now() };
+      group.items.push(item);
+      expandedScriptItems.add(item.id);
+      saveWorkspace(true); renderScripts();
+    });
+    list.append(add);
+    block.append(list);
+  }
+  return block;
+}
+
+function buildScriptItem(group, item, index) {
+  const key = item.id;
+  const draft = scriptDrafts.get(key);
+  const expanded = expandedScriptItems.has(key);
+  const wrap = document.createElement('div');
+  wrap.className = 'script-item' + (expanded ? ' expanded' : '');
+  wrap.dataset.itemId = item.id;
+
+  const head = document.createElement('div');
+  head.className = 'script-item-head';
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'script-item-toggle';
+  toggle.setAttribute('aria-expanded', String(expanded));
+  const title = document.createElement('strong');
+  title.textContent = (draft ? draft.title : item.title) || '未命名段落';
+  const preview = document.createElement('span');
+  preview.textContent = (draft ? draft.text : item.text).replace(/\s+/g, ' ').slice(0, 48) || '（空）';
+  toggle.append(title, preview);
+  toggle.addEventListener('click', () => {
+    if (expandedScriptItems.has(key)) expandedScriptItems.delete(key);
+    else expandedScriptItems.add(key);
+    renderScripts();
+  });
+  head.append(toggle);
+
+  // 段落调序：单集顺序跟着剧情走，导入顺序不对时直接上下移动
+  const move = offset => {
+    const current = group.items.indexOf(item);
+    const target = current + offset;
+    if (target < 0 || target >= group.items.length) return;
+    [group.items[current], group.items[target]] = [group.items[target], group.items[current]];
+    saveWorkspace(true); renderScripts();
+  };
+  if (index > 0) {
+    const up = document.createElement('button');
+    up.type = 'button';
+    up.className = 'text-action script-move';
+    up.textContent = '↑';
+    up.title = '上移一段';
+    up.setAttribute('aria-label', `上移 ${title.textContent}`);
+    up.addEventListener('click', () => move(-1));
+    head.append(up);
+  }
+  if (index < group.items.length - 1) {
+    const down = document.createElement('button');
+    down.type = 'button';
+    down.className = 'text-action script-move';
+    down.textContent = '↓';
+    down.title = '下移一段';
+    down.setAttribute('aria-label', `下移 ${title.textContent}`);
+    down.addEventListener('click', () => move(1));
+    head.append(down);
+  }
+
+  const copy = document.createElement('button');
+  copy.type = 'button';
+  copy.className = 'text-action';
+  copy.textContent = '复制';
+  copy.title = '复制这一段剧本全文';
+  copy.addEventListener('click', async () => {
+    const body = draft ? draft.text : item.text;
+    if (!body.trim()) { showToast('这一段还没有内容'); return; }
+    try { await copyTextToClipboard(body); showToast(`已复制「${title.textContent}」`); }
+    catch { showToast('复制失败，请重试'); }
+  });
+  head.append(copy);
+
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'text-action script-remove';
+  remove.textContent = '×';
+  remove.setAttribute('aria-label', `删除段落 ${(draft ? draft.title : item.title) || '未命名段落'}`);
+  remove.addEventListener('click', () => {
+    if (!confirm(`删除段落「${(draft ? draft.title : item.title) || '未命名段落'}」？`)) return;
+    group.items = group.items.filter(candidate => candidate.id !== item.id);
+    scriptDrafts.delete(key); expandedScriptItems.delete(key);
+    saveWorkspace(true); renderScripts();
+  });
+  head.append(remove);
+  wrap.append(head);
+
+  if (expanded) {
+    const editor = document.createElement('div');
+    editor.className = 'script-item-editor';
+    const titleInput = document.createElement('input');
+    titleInput.type = 'text';
+    titleInput.maxLength = 60;
+    titleInput.className = 'script-item-title-input';
+    titleInput.setAttribute('aria-label', '段落标题');
+    titleInput.value = (draft ? draft.title : item.title) || '';
+    titleInput.placeholder = '段落标题，例如：第1场 教室 日';
+    const text = document.createElement('textarea');
+    text.className = 'script-item-text';
+    text.spellcheck = false;
+    text.setAttribute('aria-label', '剧本内容');
+    text.value = (draft ? draft.text : item.text) || '';
+    text.placeholder = '粘贴或输入这一段的剧本内容…';
+    const actions = document.createElement('div');
+    actions.className = 'script-item-actions';
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.className = 'text-action script-save';
+    save.textContent = '保存修改';
+    save.disabled = !scriptDrafts.has(key);
+    save.addEventListener('click', () => {
+      const current = scriptDrafts.get(key);
+      if (!current) return;
+      if (!current.text.trim()) { showToast('剧本内容为空，无法保存'); return; }
+      item.title = current.title.trim() || '未命名段落';
+      item.text = current.text;
+      item.updatedAt = Date.now();
+      scriptDrafts.delete(key);
+      saveWorkspace(true); renderScripts();
+      showToast(`已保存「${item.title}」`);
+    });
+    const discard = document.createElement('button');
+    discard.type = 'button';
+    discard.className = 'text-action';
+    discard.textContent = '放弃修改';
+    discard.disabled = !scriptDrafts.has(key);
+    discard.addEventListener('click', () => { scriptDrafts.delete(key); renderScripts(); });
+    for (const input of [titleInput, text]) {
+      input.addEventListener('input', () => {
+        scriptDrafts.set(key, { title: titleInput.value, text: text.value });
+        save.disabled = titleInput.value === item.title && text.value === item.text;
+        discard.disabled = false;
+      });
+    }
+    actions.append(save, discard);
+    editor.append(titleInput, text, actions);
+    wrap.append(editor);
+  }
+  return wrap;
+}
+
+function addScriptGroup() {
+  if (state.scripts.groups.length >= 200) { showToast('分组已达上限（200 组）'); return; }
+  const used = new Set(state.scripts.groups.map(group => group.name));
+  let index = state.scripts.groups.length + 1;
+  let name = `第${String(index).padStart(2, '0')}集`;
+  while (used.has(name)) { index += 1; name = `第${String(index).padStart(2, '0')}集`; }
+  const group = { id: scriptUid('sg'), name, items: [] };
+  state.scripts.groups.push(group);
+  expandedScriptGroups.add(group.id);
+  renamingScriptGroupId.id = group.id;
+  saveWorkspace(true); renderScripts();
+  el.scriptAccordion.open = true;
+  state.accordions.scripts = true;
+}
+
+/* 剧本拖拽导入：txt（自动识别 UTF-8 / GB18030 / UTF-16）与 docx（解析 ZIP 里的 word/document.xml），
+   内容里带「第X集/话/章」标记时自动拆成单集段落。只在面板内处理文件内容，不改任何真实素材。 */
+const SCRIPT_IMPORT_ACCEPT = new Set(['txt', 'md', 'docx']);
+
+async function readTextFileSmart(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (bytes[0] === 0xff && bytes[1] === 0xfe) return new TextDecoder('utf-16le').decode(bytes);
+  if (bytes[0] === 0xfe && bytes[1] === 0xff) return new TextDecoder('utf-16be').decode(bytes);
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+  catch {
+    try { return new TextDecoder('gb18030').decode(bytes); }
+    catch { return new TextDecoder('utf-8').decode(bytes); }
+  }
+}
+
+async function extractDocxText(file) {
+  const buffer = new Uint8Array(await file.arrayBuffer());
+  const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+  let eocd = -1;
+  for (let i = buffer.length - 22; i >= Math.max(0, buffer.length - 22 - 65536); i--) {
+    if (view.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error('不是有效的 docx（ZIP）文件');
+  const entryCount = view.getUint16(eocd + 10, true);
+  let cursor = view.getUint32(eocd + 16, true);
+  let target = null;
+  for (let i = 0; i < entryCount; i++) {
+    if (view.getUint32(cursor, true) !== 0x02014b50) break;
+    const method = view.getUint16(cursor + 10, true);
+    const compressedSize = view.getUint32(cursor + 20, true);
+    const nameLen = view.getUint16(cursor + 28, true);
+    const extraLen = view.getUint16(cursor + 30, true);
+    const commentLen = view.getUint16(cursor + 32, true);
+    const localOffset = view.getUint32(cursor + 42, true);
+    const name = new TextDecoder().decode(buffer.subarray(cursor + 46, cursor + 46 + nameLen));
+    if (name === 'word/document.xml') { target = { method, compressedSize, localOffset }; break; }
+    cursor += 46 + nameLen + extraLen + commentLen;
+  }
+  if (!target) throw new Error('docx 里没有找到正文（word/document.xml）');
+  const localNameLen = view.getUint16(target.localOffset + 26, true);
+  const localExtraLen = view.getUint16(target.localOffset + 28, true);
+  const dataStart = target.localOffset + 30 + localNameLen + localExtraLen;
+  const rawData = buffer.subarray(dataStart, dataStart + target.compressedSize);
+  let xml;
+  if (target.method === 0) xml = new TextDecoder('utf-8').decode(rawData);
+  else {
+    const stream = new Blob([rawData]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+    xml = await new Response(stream).text();
+  }
+  return xml
+    .replace(/<w:tab[^>]*\/>/g, '\t')
+    .replace(/<\/w:p>/g, '\n')
+    .replace(/<w:br[^>]*\/>/g, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'").replace(/&amp;/g, '&');
+}
+
+function splitScriptByEpisodes(text) {
+  const marker = /^\s*#?\s*第[0-9一二三四五六七八九十百千零两]+[集话回章]/;
+  const chunks = [];
+  let current = null;
+  for (const line of text.split('\n')) {
+    if (marker.test(line)) {
+      if (current) chunks.push(current);
+      current = { title: line.trim().replace(/^#+\s*/, '').slice(0, 60), lines: [] };
+    }
+    if (!current) {
+      if (!line.trim()) continue;
+      current = { title: '开头', lines: [] };
+    }
+    current.lines.push(line);
+  }
+  if (current) chunks.push(current);
+  if (chunks.length < 2) return null;
+  const result = chunks
+    .map(chunk => ({ title: chunk.title, text: chunk.lines.join('\n').trim() }))
+    .filter(chunk => chunk.text);
+  return result.length >= 2 ? result : null;
+}
+
+// 拖拽导入剧本文件。保护一：目标分组达到 100 段上限后，统计并提示被丢弃的剩余段数，不再静默丢弃。
+// 保护二：单段文本超过 20 万字时截断保留前 20 万字入库并计数提示，与 loadWorkspace 的截尾兜底一致。
+async function importScriptFiles(files, targetGroupId) {
+  let groupsCreated = 0;
+  let itemsAdded = 0;
+  let splitCount = 0;
+  let droppedTotal = 0;
+  let truncatedCount = 0;
+  for (const file of Array.from(files || [])) {
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+    if (!SCRIPT_IMPORT_ACCEPT.has(ext)) {
+      showToast(ext === 'doc' ? '暂不支持旧版 .doc：请在 Word 里另存为 .docx 或 .txt 再拖入' : `跳过不支持的文件：${file.name}`);
+      continue;
+    }
+    let text = '';
+    try {
+      text = ext === 'docx' ? await extractDocxText(file) : await readTextFileSmart(file);
+    } catch (error) {
+      showToast(`读取失败 ${file.name}：${error.message}`);
+      continue;
+    }
+    text = text.replace(/\r\n/g, '\n').trim();
+    if (!text) { showToast(`文件是空的：${file.name}`); continue; }
+    let group = targetGroupId ? state.scripts.groups.find(candidate => candidate.id === targetGroupId) : null;
+    if (!group) {
+      if (state.scripts.groups.length >= 200) { showToast('分组已达上限（200 组）'); break; }
+      group = { id: scriptUid('sg'), name: file.name.replace(/\.[^.]+$/, '').slice(0, 60), items: [] };
+      state.scripts.groups.push(group);
+      groupsCreated += 1;
+    }
+    const chunks = splitScriptByEpisodes(text);
+    const pending = chunks || [{ title: file.name.replace(/\.[^.]+$/, '').slice(0, 60), text }];
+    for (let chunkIndex = 0; chunkIndex < pending.length; chunkIndex += 1) {
+      const chunk = pending[chunkIndex];
+      if (group.items.length >= 100) {
+        droppedTotal += pending.length - chunkIndex;
+        showToast(`分组「${group.name}」段落已达上限（100 段）`);
+        break;
+      }
+      if (chunk.text.length > 200000) {
+        chunk.text = chunk.text.slice(0, 200000);
+        truncatedCount += 1;
+      }
+      group.items.push({ id: scriptUid('si'), title: chunk.title, text: chunk.text, updatedAt: Date.now() });
+      itemsAdded += 1;
+    }
+    if (chunks) splitCount += 1;
+    expandedScriptGroups.add(group.id);
+    targetGroupId = '';
+  }
+  if (itemsAdded) {
+    saveWorkspace(true); renderScripts();
+    el.scriptAccordion.open = true;
+    state.accordions.scripts = true;
+    showToast(`已导入 ${itemsAdded} 段剧本${groupsCreated ? `（新建 ${groupsCreated} 组）` : ''}${splitCount ? `，按集数自动拆分 ${splitCount} 个文件` : ''}${droppedTotal ? `；分组段落超上限，已丢弃 ${droppedTotal} 段（可拆分文件后重拖）` : ''}${truncatedCount ? `；${truncatedCount} 段超 20 万字已截断保留前 20 万字` : ''}`);
+  }
+}
+
+function wireScriptImportDrop() {
+  const panel = el.scriptAccordion;
+  const hasFiles = event => [...(event.dataTransfer?.types || [])].includes('Files');
+  panel.addEventListener('dragover', event => {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    panel.classList.add('script-drag-over');
+    panel.querySelectorAll('.script-group.drop-target').forEach(el => el.classList.remove('drop-target'));
+    const groupEl = event.target.closest?.('.script-group[data-group-id]');
+    if (groupEl) groupEl.classList.add('drop-target');
+  });
+  panel.addEventListener('dragleave', event => {
+    if (event.target !== panel) return;
+    panel.classList.remove('script-drag-over');
+    panel.querySelectorAll('.script-group.drop-target').forEach(el => el.classList.remove('drop-target'));
+  });
+  panel.addEventListener('drop', async event => {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    panel.classList.remove('script-drag-over');
+    panel.querySelectorAll('.script-group.drop-target').forEach(el => el.classList.remove('drop-target'));
+    const groupEl = event.target.closest?.('.script-group[data-group-id]');
+    try {
+      await importScriptFiles(event.dataTransfer.files, groupEl?.dataset.groupId || '');
+    } catch (error) {
+      showToast(`导入失败：${error.message}`);
+    }
+  });
+}
+
 function syncAccordionState() {
   el.promptAccordion.open = !!state.accordions.prompt;
+  el.scriptAccordion.open = !!state.accordions.scripts;
   el.assetAccordion.open = !!state.accordions.assets;
 }
 
@@ -986,7 +1512,7 @@ function buildQuickFileCard(item) {
     dragged = true;
     wrapper.classList.add('asset-dragging');
     // 框选模式下拖动任一选中卡 = 按选入顺序整批拖出（原生多文件拖动进剪映）
-    if (state.quickSelectMode && state.quickSelectionOrder.length && typeof API.startAssetDragSelection === 'function') {
+    if (state.quickSelectMode && state.quickSelectionOrder.includes(item.path) && typeof API.startAssetDragSelection === 'function') {
       event.preventDefault();
       event.stopPropagation();
       API.startAssetDragSelection([...state.quickSelectionOrder]);
@@ -1006,6 +1532,7 @@ function buildQuickFileCard(item) {
   const button = document.createElement('button');
   button.type = 'button';
   button.className = `asset-image-card ${item.type}`;
+  button.draggable = true;
   button.title = `${item.name}\n点击放大或预览，可再跳转完整库`;
   let preview;
   if (item.type === 'image') {
@@ -1063,19 +1590,6 @@ function buildQuickFileCard(item) {
     else openFullAssetLibrary();
   });
   wrapper.appendChild(button);
-  if (['image', 'video', 'audio'].includes(item.type) && typeof API.automation === 'function') {
-    const sendButton = document.createElement('button');
-    sendButton.type = 'button';
-    sendButton.className = 'asset-send-button';
-    sendButton.textContent = '传网页';
-    sendButton.title = '直接传入当前网页的上传框';
-    sendButton.setAttribute('aria-label', `将 ${item.name} 传入网页`);
-    sendButton.addEventListener('click', event => {
-      event.stopPropagation();
-      window.creatorAutomationUI?.sendAsset(item.path);
-    });
-    wrapper.appendChild(sendButton);
-  }
   if (item.type === 'image' && typeof API.copyAsset === 'function') {
   const copyButton = document.createElement('button');
       copyButton.type = 'button';
@@ -1524,7 +2038,7 @@ function renderDownloads() {
     });
   }
   const attentionRank = download => {
-    if (download.ingestState === 'error' || download.lineageState === 'error' || ['interrupted', 'cancelled'].includes(download.state)) return 0;
+    if (download.ingestState === 'error' || ['interrupted', 'cancelled'].includes(download.state)) return 0;
     if (['progressing', 'paused'].includes(download.state)) return 1;
     return 3;
   };
@@ -1587,7 +2101,7 @@ function renderDownloads() {
       : '已归档';
     meta.append(source, size);
     card.appendChild(meta);
-    const diagnostics = [download.error, download.ingestError, download.lineageError].filter(Boolean);
+    const diagnostics = [download.error, download.ingestError].filter(Boolean);
     if (diagnostics.length) {
       const error = document.createElement('p');
       error.className = 'download-error';
@@ -1829,10 +2343,12 @@ async function selectTab(tabId) {
   try {
     if (tabId === state.browser?.tabId) {
       await API.focusBrowser();
+      scrollActiveTabIntoView();
       return;
     }
     const browser = await API.selectTab(tabId);
     if (browser) applyBrowserState(browser);
+    scrollActiveTabIntoView();
     queueBoundsUpdate();
   } catch (error) {
     showToast(error.message || '切换网页失败');
@@ -2175,6 +2691,14 @@ function bindEvents() {
   el.restoreAllPlatforms.addEventListener('click', restoreAllPlatforms);
   el.duplicateTab.addEventListener('click', duplicateActiveTab);
   el.clearBrowserTabs.addEventListener('click', clearBrowserTabs);
+  // 标签条滚轮横向滚动：鼠标滚轮纵向增量转成横向滚动（触屏横向平移与 shift+滚轮走原生 deltaX，不受影响），
+  // 解决网页标签超过一屏后，鼠标用户无法移动到右侧标签的问题。
+  el.platformTabs.addEventListener('wheel', event => {
+    if (event.deltaY === 0) return;
+    if (el.platformTabs.scrollWidth <= el.platformTabs.clientWidth) return;
+    event.preventDefault();
+    el.platformTabs.scrollLeft += event.deltaY;
+  }, { passive: false });
   el.platformForm.addEventListener('keydown', event => {
     if (event.key !== 'Escape') return;
     event.preventDefault();
@@ -2224,6 +2748,13 @@ function bindEvents() {
     saveWorkspace();
     queueBoundsUpdate();
   });
+  el.scriptAccordion.addEventListener('toggle', () => {
+    state.accordions.scripts = el.scriptAccordion.open;
+    saveWorkspace();
+    queueBoundsUpdate();
+  });
+  el.addScriptGroup.addEventListener('click', addScriptGroup);
+  wireScriptImportDrop();
   el.assetAccordion.addEventListener('toggle', () => {
     state.accordions.assets = el.assetAccordion.open;
     saveWorkspace();
@@ -2248,7 +2779,7 @@ function bindEvents() {
     try {
       const result = await API.toggleDragTray();
       showToast(result?.open
-        ? '悬浮窗已开启（置顶小窗）：拖卡片进剪映，或点卡片复制后 ⌘V 粘贴'
+        ? '悬浮窗已开启（置顶小窗，仅视频和音频）：拖卡片进剪映，按住标题栏可移动'
         : '剪映悬浮窗已关闭');
     } catch (error) { showToast(error.message || '悬浮窗开启失败'); }
   });
@@ -2369,30 +2900,11 @@ function bindEvents() {
     if (!result?.ok) showToast(result?.error || '文件拖拽失败，请重试');
   });
   API.onDownload(download => {
-    const isNew = !state.downloads.has(download.id);
-    if (isNew) {
-      // 血缘：按下载记录自己的模式快照，避免用户切换模式后串线
-      const mode = download.mode === 'video' ? 'video' : 'image';
-      state.promptAtStart.set(download.id, state.prompts[mode] || '');
-    }
     state.downloads.set(download.id, download);
     renderDownloads();
-    if (download.state === 'completed' && !state.lineageWritten.has(download.id)) {
-      state.lineageWritten.add(download.id);
-      writeLineageSidecar(download).then(result => {
-        const current = state.downloads.get(download.id);
-        if (!current) return;
-        if (typeof result === 'string' && result.startsWith('error:')) {
-          current.lineageState = 'error';
-          current.lineageError = `提示词血缘写入失败：${result.slice(6)}`;
-          showToast(`${download.filename} 已归档，但提示词血缘未写入`);
-        } else if (result === 'saved') {
-          current.lineageState = 'saved';
-        }
-        renderDownloads();
-      });
+    if (download.state === 'completed' && !state.archiveNotified.has(download.id)) {
+      state.archiveNotified.add(download.id);
       loadProduction(true).then(() => {
-
         renderDownloads();
       }).catch(() => {});
       showToast(`${download.filename} 已自动归档`);

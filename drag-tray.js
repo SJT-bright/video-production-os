@@ -1,14 +1,14 @@
 'use strict';
 
-// 剪映拖拽助手：置顶小窗列出当前剧本资产，卡片原生拖拽进剪映，点卡片复制文件到剪贴板（剪映 ⌘V）。
+// 剪映拖拽助手：置顶小窗列出当前剧本的视频和音频，卡片原生拖拽进剪映；导入剪映只走拖拽。
 const el = Object.fromEntries([
-  'trayProject', 'trayRefresh', 'trayClose', 'trayChips', 'trayList', 'trayToast',
-  'traySelectMode', 'trayBatch', 'trayCopyBatch', 'trayClearSelection',
+  'trayProject', 'trayRefresh', 'trayClose', 'trayChips', 'trayList', 'trayToast', 'trayStatus',
+  'traySelectMode', 'trayBatch', 'trayBatchHint', 'trayClearSelection',
 ].map(id => [id, document.getElementById(id)]));
 
-const state = { filter: 'all', assets: [] };
-// 选择模式：点卡片按点击顺序选入序列，「复制到剪映」按该顺序放入剪贴板文件列表——
-// 剪映一次 ⌘V 按同一顺序导入，正好对应「哪一集第几个片段」的依次导入需求。
+const state = { filter: 'video', assets: [] };
+// 多选模式：点卡片按点击顺序选入序列，拖动任一选中卡把整批按同一顺序拖进剪映——
+// 剪映素材库按该顺序接收，正好对应「哪一集第几个片段」的依次导入需求。
 let selectMode = false;
 const selectionOrder = [];
 
@@ -20,21 +20,54 @@ function showToast(message) {
   toastTimer = setTimeout(() => el.trayToast.classList.remove('show'), 2200);
 }
 
-function assetUrl(relativePath) {
-  return `/api/creative-assets/file?project=${encodeURIComponent(activeProjectId())}&p=${encodeURIComponent(relativePath)}`;
-}
-
 function activeProjectId() {
   return window.__trayProjectId || 'inspiration';
 }
 
+// 剪映联动只需要视频和音频；成片不进悬浮窗（成片走成片库管理，避免误拖进剪辑）。
+// 成片语义核对（已完成核对，仅落注释、不改行为）：
+// ① editorExports.owner（editor-exports.cjs:65-67）把 finals 定义为「项目成片分类文件夹（<项目>/成片/）下的视频」；
+// ② purpose=finals 只作用于外部媒体索引来源（server.js:1464），悬浮窗数据源是创作资产树，不经过该来源；
+// ③ 因此在本数据源上按文件夹名跳过「成片」与 finals 过滤语义等价；显示层排除只影响列表，永不删除文件。
 function flattenAssets(node, out) {
   if (!node) return;
   if (node.kind === 'folder') {
+    if (node.name === '成片') return;
     (node.children || []).forEach(child => flattenAssets(child, out));
     return;
   }
-  if (['image', 'video', 'audio'].includes(node.type)) out.push(node);
+  if (['video', 'audio'].includes(node.type)) out.push(node);
+}
+
+// 角标索引：与“全部资产”的索引方式一致——文件名尾号（尾号前必须有 -、_ 或空格分隔符：
+// 生成视频-029 → #029、IMG_1234 → #1234；final_v2 这类版本尾号不算索引）加生成日期。
+// 日期只扫描目录部分（路径去掉文件名），避免文件名里的日期覆盖日期文件夹语义；
+// 目录无日期时回退文件修改时间，并按本地时区取年月日——直接切 UTC ISO 串会让
+// UTC+8 凌晨生成的文件显示成前一天。
+function assetBadge(item) {
+  const stem = item.name.replace(/\.[^.]+$/, '');
+  const seq = (stem.match(/[-_\s](\d{1,4})$/) || [])[1] || '';
+  const dirPart = String(item.path || '').replace(/[^/]+$/, '');
+  const dateMatches = [...dirPart.matchAll(/(\d{4})-(\d{2})-(\d{2})/g)];
+  let year, month, day;
+  if (dateMatches.length) {
+    [, year, month, day] = dateMatches[dateMatches.length - 1];
+  } else if (item.mtime) {
+    const local = new Date(item.mtime);
+    if (!Number.isNaN(local.getTime())) {
+      year = String(local.getFullYear());
+      month = String(local.getMonth() + 1).padStart(2, '0');
+      day = String(local.getDate()).padStart(2, '0');
+    }
+  }
+  const shortDate = month ? `${Number(month)}/${Number(day)}` : '';
+  const fullDate = year ? `${year}-${month}-${day}` : '';
+  return {
+    text: [seq && `#${seq}`, shortDate].filter(Boolean).join(' '),
+    title: fullDate
+      ? (seq ? `全部资产索引：${stem} · 生成日期 ${fullDate}` : `生成日期 ${fullDate}`)
+      : (seq ? `全部资产索引：${stem}` : ''),
+  };
 }
 
 // 请求代号守卫：快速切换项目/连续刷新时，后完成的旧响应不得覆盖新渲染；
@@ -52,8 +85,13 @@ async function loadAssets() {
     const project = (projects.projects || []).find(item => item.id === projects.activeProjectId) || null;
     const newProjectId = projects.activeProjectId || 'inspiration';
     const projectChanged = window.__trayProjectId !== newProjectId;
-    // 项目切换或资产被删除后，清掉不再存在的选入项，避免整批拖出失败
-    if (projectChanged) selectionOrder.length = 0;
+    // 项目切换或资产被删除后，清掉不再存在的选入项，避免整批拖出失败；切换清空要给出提示
+    if (projectChanged && selectionOrder.length) {
+      showToast(`已切换到「${project ? project.name : '灵感生成'}」，原选中 ${selectionOrder.length} 项已清空`);
+      selectionOrder.length = 0;
+    } else if (projectChanged) {
+      selectionOrder.length = 0;
+    }
     window.__trayProjectId = newProjectId;
     el.trayProject.textContent = project ? project.name : '灵感生成';
     const assetsResp = await fetch(`/api/creative-assets?project=${encodeURIComponent(newProjectId)}`, { cache: 'no-store' });
@@ -88,8 +126,29 @@ function updateBatchBar() {
 }
 
 const renderLog = [];
+// 板块计数与常显状态行：供人工和自动化操作快速核对当前列表内容
+function updateChipsAndStatus() {
+  const counts = { video: 0, audio: 0 };
+  for (const item of state.assets) {
+    if (counts[item.type] !== undefined) counts[item.type]++;
+  }
+  el.trayChips.querySelectorAll('.chip').forEach(chip => {
+    const type = chip.dataset.filter;
+    const label = type === 'video' ? '视频' : '音频';
+    chip.textContent = `${label} ${counts[type] || 0}`;
+  });
+  const activeLabel = state.filter === 'video' ? '视频' : '音频';
+  // 列表最多渲染 120 张卡（renderList 的 slice(0,120)），状态行计的却是全部资产：
+  // 当前板块过滤后超出 120 时在状态行追加说明，避免大库下「可见卡数 ≠ 计数」造成误读。
+  const visibleInTab = state.assets.filter(item => item.type === state.filter).length;
+  const capNote = visibleInTab > 120 ? ' · 已显示前 120 项' : '';
+  el.trayStatus.textContent =
+    `共 ${state.assets.length} 项 · 视频 ${counts.video || 0} · 音频 ${counts.audio || 0} ｜ 当前板块：${activeLabel}${capNote}`;
+}
+
 function renderList() {
-  const files = state.assets.filter(item => state.filter === 'all' || item.type === state.filter);
+  updateChipsAndStatus();
+  const files = state.assets.filter(item => item.type === state.filter);
   renderLog.push(`selectMode=${selectMode} sel=${selectionOrder.length} files=${files.length}`);
   if (renderLog.length > 6) renderLog.shift();
   el.trayList.replaceChildren();
@@ -97,8 +156,9 @@ function renderList() {
     el.trayList.appendChild(Object.assign(document.createElement('div'), { className: 'tray-state', textContent: '该类型暂无资产' }));
     return;
   }
-  const KIND_TEXT = { image: '图片', video: '视频', audio: '音频' };
+  const KIND_TEXT = { video: '视频', audio: '音频' };
   for (const item of files.slice(0, 120)) {
+    const badge = assetBadge(item);
     const card = document.createElement('button');
     card.type = 'button';
     card.className = 'tray-card';
@@ -108,21 +168,33 @@ function renderList() {
       card.classList.add('selected');
       card.dataset.order = String(orderIndex + 1);
     }
-    card.title = selectMode
-      ? `点按选入导入序列（当前第 ${orderIndex === -1 ? selectionOrder.length + 1 : orderIndex + 1} 个）`
-      : `${item.name}\n拖到剪映导入；点按复制文件`;
-    card.setAttribute('draggable', String(!selectMode));
+    // 选择模式下点按与拖拽并存：tooltip 同步说明两种操作，避免「选择模式只能点按」的误导
+    let actionTitle;
+    if (!selectMode) {
+      actionTitle = `${item.name}，拖到剪映导入`;
+    } else if (orderIndex === -1) {
+      actionTitle = `点按选入导入序列（当前第 ${selectionOrder.length + 1} 个）`
+        + (selectionOrder.length ? '；拖动选中卡整批拖进剪映' : '');
+    } else {
+      actionTitle = `已选入序列（第 ${orderIndex + 1} 个）· 点按取消；拖动任一选中卡整批拖进剪映`;
+    }
+    card.title = [actionTitle, badge.title].filter(Boolean).join('\n');
+    card.setAttribute('aria-label', [
+      `${KIND_TEXT[item.type] || item.type} ${item.name}`,
+      badge.text ? `索引 ${badge.text}` : '',
+      selectMode ? '点按选入' : '拖到剪映',
+    ].filter(Boolean).join('，'));
+    // 卡片始终可拖拽：选择模式下真实鼠标拖拽同样要触发 dragstart（拖任一选中卡 = 整批拖出）。
+    // 若随 selectMode 关闭 draggable，按 HTML 规范不会发起拖拽，整批拖出将不可达。
+    card.setAttribute('draggable', 'true');
     const thumb = document.createElement('span');
     thumb.className = 'tray-thumb';
-    if (item.type === 'image') {
-      const image = document.createElement('img');
-      image.src = assetUrl(item.path);
-      image.alt = '';
-      image.loading = 'lazy';
-      image.draggable = false;
-      thumb.appendChild(image);
-    } else {
-      thumb.textContent = item.type === 'video' ? '▶' : '♪';
+    thumb.textContent = item.type === 'video' ? '▶' : '♪';
+    if (badge.text) {
+      const badgeEl = document.createElement('span');
+      badgeEl.className = 'tray-badge';
+      badgeEl.textContent = badge.text;
+      thumb.appendChild(badgeEl);
     }
     const name = document.createElement('span');
     name.className = 'tray-name';
@@ -141,8 +213,9 @@ function renderList() {
       dragged = true;
       if (window.trayAPI && typeof window.trayAPI.startDrag === 'function') {
         event.preventDefault();
-        // 选择模式下拖任意选中卡片 = 整个选中序列按选入顺序一起拖出（原生多文件拖动）
-        if (selectMode && selectionOrder.length) {
+        // 选择模式下拖「选中卡」= 整个选中序列按选入顺序一起拖出（原生多文件拖动）；
+        // 拖未选中的卡则只拖该卡本身——与文案「拖动任一选中卡」保持一致，避免误发整批。
+        if (selectMode && selectionOrder.length && selectionOrder.includes(item.path)) {
           window.trayAPI.startDragSelection([...selectionOrder]);
           return;
         }
@@ -157,8 +230,13 @@ function renderList() {
       if (dragged) return;
       if (selectMode) {
         const idx = selectionOrder.indexOf(item.path);
-        if (idx === -1) selectionOrder.push(item.path);
-        else selectionOrder.splice(idx, 1);
+        if (idx === -1) {
+          // 与主进程上限对齐：一次最多整批拖出 100 个文件，超限直接提示
+          if (selectionOrder.length >= 100) { showToast('一次最多整批拖出 100 项'); return; }
+          selectionOrder.push(item.path);
+        } else {
+          selectionOrder.splice(idx, 1);
+        }
         updateBatchBar();
         renderList();
       }
@@ -180,6 +258,7 @@ el.trayClose.addEventListener('click', () => { if (window.trayAPI) window.trayAP
 el.traySelectMode.addEventListener('click', () => {
   selectMode = !selectMode;
   el.traySelectMode.classList.toggle('on', selectMode);
+  el.traySelectMode.setAttribute('aria-pressed', String(selectMode));
   if (!selectMode) selectionOrder.length = 0;
   updateBatchBar();
   renderList();
@@ -196,6 +275,29 @@ if (window.trayAPI && typeof window.trayAPI.onDragResult === 'function') {
     else if (result) showToast(result.error || '拖拽未完成');
   });
 }
+
+// 窗口拖拽兜底：标题栏原生 -webkit-app-region 失效的机器上，用指针位移让主进程移动窗口。
+// 原生拖拽区生效时指针事件不会到达页面，两条路径不会叠加。
+const trayHead = document.querySelector('.tray-head');
+let windowDrag = null;
+trayHead.addEventListener('pointerdown', event => {
+  if (event.target.closest('.tray-btn')) return;
+  if (!window.trayAPI || typeof window.trayAPI.moveWindow !== 'function') return;
+  if (typeof event.screenX !== 'number') return;
+  windowDrag = { x: event.screenX, y: event.screenY };
+  try { trayHead.setPointerCapture(event.pointerId); } catch {}
+});
+trayHead.addEventListener('pointermove', event => {
+  if (!windowDrag) return;
+  const dx = Math.round(event.screenX - windowDrag.x);
+  const dy = Math.round(event.screenY - windowDrag.y);
+  windowDrag.x = event.screenX;
+  windowDrag.y = event.screenY;
+  if (dx || dy) window.trayAPI.moveWindow(dx, dy);
+});
+const endWindowDrag = () => { windowDrag = null; };
+trayHead.addEventListener('pointerup', endWindowDrag);
+trayHead.addEventListener('pointercancel', endWindowDrag);
 
 const events = new EventSource('/api/events');
 events.addEventListener('creative-assets', () => { loadAssets().catch(() => {}); });

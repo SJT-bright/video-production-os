@@ -14,6 +14,8 @@ contextBridge.exposeInMainWorld('assetAPI', Object.freeze({
   getConfig: () => ipcRenderer.invoke('asset:get-config'),
   setPanelState: patch => ipcRenderer.invoke('asset:set-panel-state', patch),
   startDrag: relativePath => ipcRenderer.send('asset:start-drag', { path: relativePath }),
+  // 多选整批拖出：{paths} 数组按选入顺序整批发送，主进程共享 startAssetDrag 展开为原生多文件拖动（同悬浮窗语义）
+  startDragSelection: paths => ipcRenderer.send('asset:start-drag', { paths }),
   copyImage: relativePath => ipcRenderer.invoke('asset:copy-image', { path: relativePath }),
   showItem: relativePath => ipcRenderer.invoke('asset:show-item', { path: relativePath }),
   deleteItem: relativePath => ipcRenderer.invoke('asset:delete-item', { path: relativePath }),

@@ -19,11 +19,16 @@ async function main() {
     if (route.request().method() !== 'GET') return route.abort('blockedbyclient');
     return route.continue();
   });
-  await page.route('**/api/prompt-sidecar', route => route.fulfill({
-    status: 200,
-    contentType: 'application/json',
-    body: JSON.stringify({ ok: true }),
-  }));
+  // .prompt.txt 伴生文件已停止写入：任何对 prompt-sidecar 的调用（尤其 POST）都不应再发生
+  const sidecarRequests = [];
+  await page.route('**/api/prompt-sidecar', route => {
+    sidecarRequests.push(route.request().method());
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ ok: true, found: false }),
+    });
+  });
   await page.route('**/api/knowledge', route => route.fulfill({
     status: 200,
     contentType: 'application/json',
@@ -948,6 +953,7 @@ async function main() {
   assert.ok(selected.some(item => item.mode === 'video' && item.serviceId === 'updream'));
   await page.evaluate(() => window.__creatorTest.emitAsset({ open: false, layout: 'overlay', width: 520, creativeAssetAvailable: false }));
   assert.equal(await page.locator('#toggleAssets').isDisabled(), true, '创作资产库不可用时入口应明确禁用');
+  assert.deepEqual(sidecarRequests, [], '提示词伴生文件已停止写入，不应有任何 prompt-sidecar 请求');
   assert.deepEqual(pageErrors, []);
   assert.deepEqual(consoleErrors, []);
 

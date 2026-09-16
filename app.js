@@ -1988,7 +1988,7 @@ const AgentApp = {
 };
 
 /* ---------- 应用：创作浏览器 ---------- */
-const HEHUI_PROJECT_URL = 'https://hehui.dawncoreai.com/';
+const HEHUI_PROJECT_URL = 'https://hehui.dawncoreai.com/drama/project-manage/project-details/project-role?id=1704&project_name=%E7%9F%AD%E5%89%A7+%E3%80%8A%E9%99%86%E6%80%BB%EF%BC%8C%E5%88%AB%E8%BF%BD%E4%BA%86%E3%80%8B';
 const INSPIRATION_PROJECT_ID = 'inspiration';
 
 const CreatorEntry = {
@@ -2438,6 +2438,136 @@ const dashboardMediaCard = (file, list) => {
   );
 };
 
+/* ---------- 成就彩蛋：只在主页（总览）可见。时间成就按视频模式累计时长叠加，资产成就随媒体资产数量解锁 ---------- */
+const ACHIEVEMENT_KEY = 'videoOS.achievements.v1';
+const ACHIEVEMENT_TIME_TIERS = [
+  { hours: 1, name: '开机大吉', hint: '视频模式累计创作 1 小时' },
+  { hours: 3, name: '灵感涌动', hint: '视频模式累计创作 3 小时' },
+  { hours: 5, name: '小有名气', hint: '视频模式累计创作 5 小时' },
+  { hours: 10, name: '创作快手', hint: '视频模式累计创作 10 小时' },
+  { hours: 20, name: '短剧工匠', hint: '视频模式累计创作 20 小时' },
+  { hours: 30, name: '镜头语言家', hint: '视频模式累计创作 30 小时' },
+  { hours: 50, name: '银幕造梦师', hint: '视频模式累计创作 50 小时' },
+  { hours: 80, name: '爆款预备役', hint: '视频模式累计创作 80 小时' },
+  { hours: 100, name: '百时导演', hint: '视频模式累计创作 100 小时' },
+  { hours: 150, name: '金牌创作人', hint: '视频模式累计创作 150 小时' },
+  { hours: 200, name: '短剧狂人', hint: '视频模式累计创作 200 小时' },
+  { hours: 300, name: '造浪者', hint: '视频模式累计创作 300 小时' },
+  { hours: 500, name: '短剧传奇', hint: '视频模式累计创作 500 小时' },
+  { hours: 800, name: '时间炼金术士', hint: '视频模式累计创作 800 小时' },
+  { hours: 1000, name: '万时封神', hint: '视频模式累计创作 1000 小时' },
+];
+const ACHIEVEMENT_ASSET_TIERS = [
+  { count: 500, name: '素材收藏家', hint: '媒体资产累计 500 个' },
+  { count: 1000, name: '千帧船长', hint: '媒体资产累计 1000 个' },
+  { count: 1500, name: '资产大亨', hint: '媒体资产累计 1500 个' },
+  { count: 2000, name: '两千金库', hint: '媒体资产累计 2000 个' },
+];
+
+function readAchievementSeconds() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(ACHIEVEMENT_KEY) || '{}');
+    return Math.max(0, Number(parsed && parsed.videoSeconds) || 0);
+  } catch { return 0; }
+}
+
+function formatAchievementDuration(seconds) {
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `${hours} 小时 ${rest} 分` : `${hours} 小时`;
+}
+
+/* 奖杯图：按等级生成专属奖章（金属配色 + 勋带 + 时长/数量刻字），未解锁为灰色款。 */
+const ACHIEVEMENT_METALS = [
+  { light: '#e2b36f', dark: '#9a6a2f', edge: '#7c5423', text: '#4a3110', ribbon: '#c9564d' },  // 铜
+  { light: '#d9dee5', dark: '#8f979f', edge: '#6f767e', text: '#3c4148', ribbon: '#8a97a6' },  // 银
+  { light: '#f7dd7a', dark: '#c39a22', edge: '#9a7a17', text: '#5c450a', ribbon: '#c9564d' },  // 金
+  { light: '#f7a8b8', dark: '#c25a70', edge: '#9a4055', text: '#5c2231', ribbon: '#a13046' },  // 红宝石
+  { light: '#a8d8ff', dark: '#4a86d8', edge: '#3568ab', text: '#1d3f6b', ribbon: '#3568ab' },  // 蓝宝石
+  { light: '#b9a8f7', dark: '#7a5ccc', edge: '#5d43a3', text: '#372766', ribbon: '#6b3fa8' },  // 紫水晶
+  { light: '#a8ecd4', dark: '#3fae85', edge: '#2e8767', text: '#175038', ribbon: '#2e8767' },  // 翡翠
+  { light: '#ffc39b', dark: '#e07a3f', edge: '#b25d2c', text: '#6b3617', ribbon: '#d2691e' },  // 琥珀
+  { light: '#c9ced6', dark: '#5d646d', edge: '#454b52', text: '#2c3036', ribbon: '#454b52' },  // 黑曜
+  { light: '#ffd98a', dark: '#d24a43', edge: '#a33328', text: '#fff8ec', ribbon: '#a33328' },  // 传说
+];
+const ACHIEVEMENT_LOCKED_METAL = { light: '#cfcfcf', dark: '#8f8f8f', edge: '#737373', text: '#4f4f4f', ribbon: '#9a9a9a' };
+
+function achievementMedalSvg(label, metal, unlocked) {
+  const m = unlocked ? metal : ACHIEVEMENT_LOCKED_METAL;
+  const fontSize = label.length <= 3 ? 13 : label.length <= 5 ? 10 : 8;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">`
+    + `<path d="M21 3 L27 22 L18 26 L11 7 Z" fill="${m.ribbon}"/>`
+    + `<path d="M43 3 L37 22 L46 26 L53 7 Z" fill="${m.ribbon}" opacity=".78"/>`
+    + `<circle cx="32" cy="39" r="18.5" fill="${m.dark}"/>`
+    + `<circle cx="32" cy="38" r="18.5" fill="none" stroke="${m.edge}" stroke-width="2"/>`
+    + `<circle cx="32" cy="38" r="13.5" fill="none" stroke="rgba(255,255,255,.55)" stroke-width="1.4"/>`
+    + `<text x="32" y="42.5" text-anchor="middle" font-family="-apple-system,'PingFang SC',sans-serif" font-size="${fontSize}" font-weight="700" fill="${m.text}">${label}</text>`
+    + `</svg>`;
+  return `<img src="data:image/svg+xml;utf8,${encodeURIComponent(svg)}" alt="" width="34" height="34" draggable="false">`;
+}
+
+function openAchievementsPanel(assetCount) {
+  const seconds = readAchievementSeconds();
+  const close = () => overlay.remove();
+  const tierRow = (name, hint, unlocked, progress, progressText, medalLabel, metal) => h('div', { class: 'achievement-row' + (unlocked ? ' unlocked' : '') },
+    h('span', { class: 'achievement-medal', html: achievementMedalSvg(medalLabel, metal, unlocked) }),
+    h('div', { class: 'achievement-row-copy' },
+      h('strong', {}, name),
+      h('small', {}, hint),
+      h('div', { class: 'achievement-bar' }, h('span', { style: `width:${Math.round(progress * 100)}%` })),
+    ),
+    h('span', { class: 'achievement-progress-text' }, progressText),
+  );
+
+  const timeRows = ACHIEVEMENT_TIME_TIERS.map((tier, index) => {
+    const target = tier.hours * 3600;
+    const unlocked = seconds >= target;
+    const prev = (() => {
+      const lower = ACHIEVEMENT_TIME_TIERS.filter(item => item.hours * 3600 < target).map(item => item.hours * 3600);
+      return lower.length ? Math.max(...lower) : 0;
+    })();
+    const progress = unlocked ? 1 : Math.min(1, Math.max(0, (seconds - prev) / Math.max(1, target - prev)));
+    const metal = ACHIEVEMENT_METALS[Math.min(ACHIEVEMENT_METALS.length - 1, Math.floor(index / 2))];
+    return tierRow(tier.name, tier.hint, unlocked, progress, unlocked ? '已解锁' : `${Math.floor(progress * 100)}%`, `${tier.hours}h`, metal);
+  });
+  const assetMetalIndexes = [1, 2, 3, 5]; // 收藏家=银，船长=金，大亨=红宝石，金库=蓝宝石
+  const assetRows = ACHIEVEMENT_ASSET_TIERS.map((tier, index) => {
+    const unlocked = assetCount >= tier.count;
+    const prev = (() => {
+      const lower = ACHIEVEMENT_ASSET_TIERS.filter(item => item.count < tier.count).map(item => item.count);
+      return lower.length ? Math.max(...lower) : 0;
+    })();
+    const progress = unlocked ? 1 : Math.min(1, Math.max(0, (assetCount - prev) / Math.max(1, tier.count - prev)));
+    return tierRow(tier.name, tier.hint, unlocked, progress, unlocked ? '已解锁' : `${Math.floor(progress * 100)}%`, String(tier.count), ACHIEVEMENT_METALS[assetMetalIndexes[index]]);
+  });
+
+  const overlay = h('div', { class: 'achievement-overlay', role: 'dialog', 'aria-label': '创作成就' },
+    h('div', { class: 'achievement-panel' },
+      h('header', { class: 'achievement-head' },
+        h('div', {},
+          h('strong', {}, '🏆 创作成就'),
+          h('small', {}, `视频模式累计创作 ${formatAchievementDuration(seconds)} · 媒体资产 ${assetCount} 个`),
+        ),
+        h('button', { class: 'achievement-close', type: 'button', 'aria-label': '关闭成就', onclick: close }, '×'),
+      ),
+      h('section', { class: 'achievement-section' },
+        h('h3', {}, '时间成就 · 随视频模式使用自动叠加'),
+        ...timeRows,
+      ),
+      h('section', { class: 'achievement-section' },
+        h('h3', {}, '资产成就 · 随素材数量增长解锁'),
+        ...assetRows,
+      ),
+      h('p', { class: 'achievement-footnote' }, '时间只在视频创作模式下累计；关掉页面也不会丢，随时回来接着叠。'),
+    ),
+  );
+  overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
+  overlay.addEventListener('keydown', event => { if (event.key === 'Escape') close(); });
+  document.body.append(overlay);
+}
+
 const OverviewApp = {
   id: 'overview', title: '总览', pageTitle: '视频制作总览', eyebrow: 'CONTENT PRODUCTION', subtitle: '网页创作、分剧本素材与成片归档',
   icon: ICONS.overview,
@@ -2512,6 +2642,12 @@ const OverviewApp = {
         stat(finals.length, '已标记成片', 'finals', 'finals'),
         stat(audios.length, '音频素材', 'audio', 'audio'),
         stat(docs, '项目知识文档', 'distill', 'docs'),
+      ),
+      h('div', { class: 'overview-achievements' },
+        h('button', {
+          class: 'achievement-egg', type: 'button', title: '创作成就 · 小彩蛋',
+          onclick: () => openAchievementsPanel(visible.length),
+        }, '🏆', h('span', {}, '成就')),
       ),
       h('section', { class: 'overview-recent' },
         h('div', { class: 'section-heading' },

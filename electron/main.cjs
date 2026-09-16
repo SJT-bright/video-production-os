@@ -16,6 +16,7 @@ const {
   ipcMain,
   nativeImage,
   nativeTheme,
+  screen,
   session,
   shell,
 } = require('electron');
@@ -228,7 +229,7 @@ function isTrustedDragTraySender(event) {
 }
 
 function isTrustedMediaSender(event) {
-  // 剪贴板等共享能力：创作窗口 HTML 层、完整资产库、剪映悬浮窗三者皆可
+  // 共享能力（原生拖拽等）：创作窗口 HTML 层、完整资产库、剪映悬浮窗三者皆可
   return isTrustedCreatorSender(event) || isTrustedAssetSender(event) || isTrustedDragTraySender(event);
 }
 
@@ -659,8 +660,7 @@ function configureSession(serviceId, ses) {
         projectDirectories: activeProjectDirectories(),
       });
       fs.mkdirSync(target.directory, { recursive: true });
-      // 图片/视频统一按“分类-序号”落盘（平台内点击下载也一样），UUID 乱名不再进入素材库；
-      // 提示词血缘 sidecar 使用最终 savePath，跟随新文件名。
+      // 图片/视频统一按“分类-序号”落盘（平台内点击下载也一样），UUID 乱名不再进入素材库。
       savePath = (target.kind === 'image' || target.kind === 'video')
         ? sequentialImportTarget(target.directory, target.kind, originalName)
         : target.targetPath;
@@ -1568,7 +1568,11 @@ function requireCreativeAsset(relativePath, expectedType = '') {
 
 function dragIconFor(absolutePath) {
   const image = nativeImage.createFromPath(absolutePath);
-  if (image.isEmpty()) return nativeImage.createFromDataURL(DRAG_FALLBACK_ICON).resize({ width: 48, height: 48 });
+  if (image.isEmpty()) {
+    const type = classifyCreativeAsset(absolutePath);
+    const icon = nativeImage.createFromPath(path.join(__dirname, '..', 'assets', 'ui', 'creator', `${type === 'video' ? 'video' : type === 'audio' ? 'audio' : 'document'}-3d-v1.png`));
+    return (icon.isEmpty() ? nativeImage.createFromDataURL(DRAG_FALLBACK_ICON) : icon).resize({ width: 64, height: 64 });
+  }
   const size = image.getSize();
   const scale = Math.min(1, 72 / Math.max(size.width || 1, size.height || 1));
   return scale < 1
@@ -1577,12 +1581,27 @@ function dragIconFor(absolutePath) {
 }
 
 // —— 剪映联动 · 迷你悬浮拖拽窗 ——
-// 置顶小窗（不抢焦点 showInactive），只占屏幕一角：拖资产卡片到剪映时间线/素材池即可导入；
-// 也可点卡片把文件复制到系统剪贴板，去剪映 ⌘V 粘贴。位置/尺寸记忆在数据目录。
+// 置顶小窗（不抢焦点 showInactive）：媒体导入剪映只走拖拽——拖单卡或整批选中卡到剪映窗口松手。
+// 尺寸按 Computer Use 自动化操作优化：大卡片、大按钮。位置/尺寸记忆在数据目录。
 let dragTrayWindow = null;
 
 function dragTrayBoundsFile() {
   return path.join(process.env.VIDEO_OS_DATA_DIR || app.getPath('temp'), 'drag-tray-bounds.json');
+}
+
+// 把悬浮窗位置钳制在最近显示器的可用区域内：防止 JS 兜底拖拽或历史记忆把小窗留在外接屏外，重启后找不回来
+function clampDragTrayBounds(bounds) {
+  try {
+    const display = screen.getDisplayNearestPoint({ x: Math.round(bounds.x || 0), y: Math.round(bounds.y || 0) });
+    const area = display.workArea;
+    const width = Math.max(120, Math.min(bounds.width || 340, area.width));
+    const height = Math.max(200, Math.min(bounds.height || 640, area.height));
+    const x = Math.max(area.x - width + 80, Math.min(Number(bounds.x) || 0, area.x + area.width - 80));
+    const y = Math.max(area.y, Math.min(Number(bounds.y) || 0, area.y + area.height - 40));
+    return { ...bounds, x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) };
+  } catch {
+    return bounds;
+  }
 }
 
 function createDragTrayWindow() {
@@ -1594,20 +1613,32 @@ function createDragTrayWindow() {
   let saved = {};
   try { saved = JSON.parse(fs.readFileSync(dragTrayBoundsFile(), 'utf-8')); } catch {}
   const options = {
-    width: 240, height: 400, minWidth: 180, minHeight: 240, maxWidth: 520, maxHeight: 800,
+    width: 340, height: 640, minWidth: 280, minHeight: 380, maxWidth: 620, maxHeight: 1000,
     frame: false, alwaysOnTop: true, show: false, fullscreenable: false, minimizable: false,
-    backgroundColor: '#1c1c20', title: '剪映拖拽助手',
+    backgroundColor: '#1c1c20', title: '剪映联动',
     webPreferences: {
       preload: path.join(__dirname, 'drag-tray-preload.cjs'),
       nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true,
     },
   };
-  if (Number.isFinite(saved.x) && Number.isFinite(saved.y)) { options.x = saved.x; options.y = saved.y; }
-  if (Number.isFinite(saved.width) && Number.isFinite(saved.height)) { options.width = saved.width; options.height = saved.height; }
+  if (Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
+    const clamped = clampDragTrayBounds({ x: saved.x, y: saved.y, width: options.width, height: options.height });
+    options.x = clamped.x; options.y = clamped.y;
+  }
+  // 迁移：旧版 240×400 小窗记忆不适用大卡片布局，只保留位置、忽略尺寸
+  if (Number.isFinite(saved.width) && saved.width >= options.minWidth
+    && Number.isFinite(saved.height) && saved.height >= options.minHeight) {
+    options.width = saved.width; options.height = saved.height;
+  }
   dragTrayWindow = new BrowserWindow(options);
   dragTrayWindow.setAlwaysOnTop(true, 'floating');
+  let saveBoundsTimer = null;
   const saveBounds = () => {
-    try { fs.writeFileSync(dragTrayBoundsFile(), JSON.stringify(dragTrayWindow.getBounds())); } catch {}
+    clearTimeout(saveBoundsTimer);
+    // 连续移动（JS 兜底拖拽会高频触发）时合并写入，停稳后 300ms 落盘
+    saveBoundsTimer = setTimeout(() => {
+      try { fs.writeFileSync(dragTrayBoundsFile(), JSON.stringify(dragTrayWindow.getBounds())); } catch {}
+    }, 300);
   };
   dragTrayWindow.on('moved', saveBounds);
   dragTrayWindow.on('resize', saveBounds);
@@ -2108,6 +2139,20 @@ function registerIpc() {
   ipcMain.on('tray:close', event => {
     requireTrusted(event, 'tray');
     if (dragTrayWindow && !dragTrayWindow.isDestroyed()) dragTrayWindow.close();
+  });
+  // 标题栏拖动兜底：按渲染层指针位移移动窗口（原生 app-region 拖拽区生效时不会走到这里），
+  // 每次移动后钳制在最近显示器的可用区域内，避免把小窗拖出屏幕找不回
+  ipcMain.on('tray:move-window', (event, payload = {}) => {
+    requireTrusted(event, 'tray');
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win || win.isDestroyed()) return;
+    const dx = Math.round(Number(payload.dx) || 0);
+    const dy = Math.round(Number(payload.dy) || 0);
+    if (!dx && !dy) return;
+    const [x, y] = win.getPosition();
+    const [width, height] = win.getSize();
+    const next = clampDragTrayBounds({ x: x + dx, y: y + dy, width, height });
+    win.setPosition(next.x, next.y);
   });
 
   ipcMain.handle('asset:copy-image', (event, payload = {}) => {

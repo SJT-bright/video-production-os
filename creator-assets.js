@@ -891,10 +891,17 @@ function createAssetCard(item) {
 
   card.addEventListener('dragstart', event => {
     card.classList.add('dragging');
-    el.assetStatus.textContent = `正在拖拽：${item.name}`;
+    // 多选后拖动任一选中卡 = 整个选中序列一起拖出（Set 迭代序即点选顺序，沿用悬浮窗 drag-tray 已验证语义）；
+    // 拖未选中的卡仍只拖该卡本身，避免误发整批。
+    const dragSelection = NATIVE_API && state.selectedPaths.size && state.selectedPaths.has(item.path)
+      ? [...state.selectedPaths]
+      : null;
+    el.assetStatus.textContent = dragSelection ? `正在拖拽：${dragSelection.length} 项选中资产` : `正在拖拽：${item.name}`;
     if (NATIVE_API) {
       event.preventDefault();
-      API.startDrag(item.path);
+      // 旧版桌面壳可能没有 startDragSelection：回退单卡拖拽，保持兼容
+      if (dragSelection && typeof API.startDragSelection === 'function') API.startDragSelection(dragSelection);
+      else API.startDrag(item.path);
     } else if (event.dataTransfer) {
       event.dataTransfer.effectAllowed = 'copy';
       event.dataTransfer.setData('text/uri-list', new URL(assetUrl(item.path), location.href).href);
@@ -1509,7 +1516,9 @@ function bindEvents() {
   API.onPanelState(applyPanelState);
   API.onDragResult(result => {
     document.querySelectorAll('.asset-card.dragging').forEach(card => card.classList.remove('dragging'));
-    if (result?.ok) el.assetStatus.textContent = '拖拽完成；可继续选择下一项资产';
+    // ok:true 仅代表拖拽会话已发起（主进程 startDrag 已调用），不等于剪映等目标应用最终收到素材，
+    // 文案据实说明；整批时主进程回执带 count，旧单卡回执无 count 则按默认措辞显示。
+    if (result?.ok) el.assetStatus.textContent = `已开始拖拽${result.count > 1 ? ` ${result.count} 项` : ''}，松手放入目标窗口`;
     else {
       el.assetStatus.textContent = '拖拽失败；可改用平台上传按钮或 Finder 定位';
       showToast(result?.error || '资产拖拽失败');
@@ -1521,8 +1530,10 @@ function bindEvents() {
 async function loadLibrary({ select } = {}) {
   const requestId = ++libraryRequestId;
   const projectId = activeProjectId();
-  state.selectedPaths.clear();
-  if (el.selectionBar) el.selectionBar.hidden = true;
+  // 后台刷新（SSE creative-assets → scheduleLibraryReload）不再无条件清空多选：
+  // 先留存本次刷新前的选择，新树就绪后做交集，只移除已不存在的路径，
+  // 避免用户正在攒整批拖出时被“生成完成/其他窗口导入”的刷新打断。
+  const previousSelection = new Set(state.selectedPaths);
   const response = await fetch(`/api/creative-assets?project=${encodeURIComponent(projectId)}`, { cache: 'no-store' });
   const data = await response.json().catch(() => ({}));
   if (requestId !== libraryRequestId || projectId !== activeProjectId()) return;
@@ -1535,10 +1546,22 @@ async function loadLibrary({ select } = {}) {
   state.config.rootName = data.rootName || state.config.rootName;
   if (typeof select === 'string') state.selectedFolder = select;
   collectTree(data.tree);
+  // 交集守卫（镜像悬浮窗 drag-tray 的失效收缩逻辑）：只保留当前树中仍存在的选中路径。
+  // 跨项目切换时新树不含旧项目路径 → 交集自然为空，等效于旧的“整单清空”，无需特殊分支；
+  // 资产被删除导致的失效收缩走同一交集，被收缩数量 >0 时给出提示。
+  const existing = new Set(state.assets.map(item => item.path));
+  const keptSelection = [...previousSelection].filter(path => existing.has(path));
+  if (keptSelection.length < previousSelection.size) {
+    showToast(`已自动移除 ${previousSelection.size - keptSelection.length} 个失效选项`);
+  }
+  state.selectedPaths = new Set(keptSelection);
   const stats = data.stats || {};
   el.librarySummary.textContent = `${state.config.project?.name || data.rootName || '创作资产库'} · ${stats.files || 0} 项 · ${stats.sizeText || '0 B'}`;
   renderFolders();
   renderAssets();
+  // 选择栏与卡片选中态跟随最终选择结果（renderAssets 已按 selectedPaths 渲染卡片），
+  // 而不是每次刷新都无条件隐藏。
+  updateSelectionBar();
   if (state.audioKind) await loadAudioLibrary();
   el.assetStatus.textContent = state.audioKind ? '填写名称或拖入音频；支持 MP3、WAV、M4A'
     : data.truncated

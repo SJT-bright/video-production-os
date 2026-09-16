@@ -126,6 +126,16 @@ try {
   const createdTree = buildCreativeAssetTree(assetRoot, { scopePath: created.folder });
   assert.doesNotMatch(JSON.stringify(createdTree.tree), /灵感生成/, '正式剧本资产树泄漏了灵感目录');
 
+  // 提示词伴生文件（*.prompt.txt）是媒体血缘元数据：不进树、不计数；普通 .txt 文档不受影响。
+  fs.writeFileSync(path.join(createdImages, '同名结果.png.prompt.txt'), '生成来源｜测试', 'utf-8');
+  fs.writeFileSync(path.join(createdImages, '普通文档.txt'), 'keep', 'utf-8');
+  const sidecarTree = buildCreativeAssetTree(assetRoot, { scopePath: created.folder });
+  const sidecarJson = JSON.stringify(sidecarTree.tree);
+  assert.doesNotMatch(sidecarJson, /prompt\.txt/, '提示词伴生文件不应作为资产出现在树中');
+  assert.match(sidecarJson, /普通文档\.txt/, '普通 txt 文档不应被误伤');
+  const createdImagesNode = sidecarTree.tree.children.find(node => node.name === '生成图片');
+  assert.equal(createdImagesNode.fileCount, 2, '伴生文件不应计入文件夹数量（同名结果.png + 普通文档.txt）');
+
   const activatedInspiration = store.activate(INSPIRATION_PROJECT_ID);
   assert.equal(activatedInspiration.active, true);
   assert.equal(store.active().id, INSPIRATION_PROJECT_ID);

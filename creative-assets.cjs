@@ -117,6 +117,9 @@ function buildCreativeAssetTree(root, { maxEntries = 20000, scopePath = '', incl
     for (const entry of entries) {
       if (remaining <= 0) { truncated = true; break; }
       if (entry.name.startsWith('.') || entry.isSymbolicLink()) continue;
+      // 提示词伴生文件（*.prompt.txt）是相邻媒体（视频/图片/音频）的血缘元数据：
+      // 不作为独立资产进入资产树，也不计入 fileCount/统计，避免“28 个视频数成 43”。
+      if (entry.name.toLowerCase().endsWith('.prompt.txt')) continue;
       const childRelative = relativeFolder ? `${relativeFolder}/${entry.name}` : entry.name;
       const childAbsolute = path.join(absoluteFolder, entry.name);
       if (entry.isDirectory()) {

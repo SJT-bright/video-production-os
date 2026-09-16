@@ -980,6 +980,10 @@ function buildScriptItem(group, item, index) {
     titleInput.setAttribute('aria-label', '段落标题');
     titleInput.value = (draft ? draft.title : item.title) || '';
     titleInput.placeholder = '段落标题，例如：第1场 教室 日';
+    head.insertBefore(titleInput, toggle);
+    toggle.textContent = '⌃';
+    toggle.classList.add('script-item-collapse');
+    toggle.setAttribute('aria-label', '收起段落');
     const text = document.createElement('textarea');
     text.className = 'script-item-text';
     text.spellcheck = false;
@@ -991,7 +995,7 @@ function buildScriptItem(group, item, index) {
     const save = document.createElement('button');
     save.type = 'button';
     save.className = 'text-action script-save';
-    save.textContent = '保存修改';
+    save.textContent = '保存';
     save.disabled = !scriptDrafts.has(key);
     save.addEventListener('click', () => {
       const current = scriptDrafts.get(key);
@@ -1007,7 +1011,7 @@ function buildScriptItem(group, item, index) {
     const discard = document.createElement('button');
     discard.type = 'button';
     discard.className = 'text-action';
-    discard.textContent = '放弃修改';
+    discard.textContent = '取消';
     discard.disabled = !scriptDrafts.has(key);
     discard.addEventListener('click', () => { scriptDrafts.delete(key); renderScripts(); });
     for (const input of [titleInput, text]) {
@@ -1018,7 +1022,7 @@ function buildScriptItem(group, item, index) {
       });
     }
     actions.append(save, discard);
-    editor.append(titleInput, text, actions);
+    editor.append(text, actions);
     wrap.append(editor);
   }
   return wrap;

@@ -467,7 +467,9 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .script-item-toggle span { overflow: hidden; color: var(--faint); font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
 .script-item-head .text-action { flex: none; padding: 2px 5px; font-size: 10px; }
 .script-item-head .script-move { min-width: 20px; padding: 2px 4px; }
-.script-item-editor { display: grid; gap: 6px; margin: 0 6px 7px; }
+.script-item-editor { display: grid; gap: 4px; margin: 0 5px 4px; }
+.script-item-head .script-item-title-input { flex: 1; min-width: 0; width: 0; min-height: 24px; padding: 2px 5px; font-weight: 650; }
+.script-item-head .script-item-collapse { flex: none; display: block; width: 22px; min-height: 24px; padding: 2px; }
 .script-item-title-input {
   min-height: 26px; padding: 3px 8px;
   border: 1px solid var(--line-strong); border-radius: 8px; background: #fff;
@@ -478,7 +480,8 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   border: 1px solid var(--line-strong); border-radius: 9px; background: #fff;
   color: var(--text); font-family: inherit; font-size: 11px; line-height: 1.65;
 }
-.script-item-actions { display: flex; gap: 6px; }
+.script-item-actions { display: flex; gap: 4px; }
+.script-item-actions .text-action { flex: none; min-height: 24px; padding: 2px 6px; font-size: 10px; }
 .script-item-actions .script-save { flex: none; min-height: 26px; padding: 3px 4px; font-size: 11px; font-weight: 650; color: var(--mode); }
 .script-item-actions .script-save:disabled { color: var(--faint); }
 .script-add-item { min-height: 27px; font-size: 11px; }

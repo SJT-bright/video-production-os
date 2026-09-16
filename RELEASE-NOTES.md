@@ -1,4 +1,6 @@
-# v1.1.2 · Mac / Windows 独立下载版
+# v1.1.3 · Mac / Windows 独立下载版
+
+- 剧本段落名称原位编辑，与操作按钮同排；保存／取消和编辑间距更紧凑。
 
 - Mac 新增独立安装版，支持 Apple 芯片和 Intel Mac；无需源码目录或 Node.js。
 - Mac 独立版素材和设置存放于用户 Application Support，不写入 App 包，替换应用保留数据。

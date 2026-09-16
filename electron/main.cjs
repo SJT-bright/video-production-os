@@ -54,7 +54,9 @@ const windowsRelease = windowsReleasePaths({
   platform: process.platform, isPackaged: app.isPackaged,
   config: RUNTIME_CONFIG, userData: app.getPath('userData'),
 });
-const macPackagedApp = app.isPackaged && process.platform === 'darwin' && !TEST_MODE;
+const macPortable = app.isPackaged && process.platform === 'darwin' && RUNTIME_CONFIG.dataLocation === 'userData';
+const macPortableRoot = macPortable ? path.join(app.getPath('userData'), 'workspace') : '';
+const macPackagedApp = app.isPackaged && process.platform === 'darwin' && !TEST_MODE && !macPortable;
 const explicitProjectRoot = String(process.env.VIDEO_OS_PROJECT_ROOT || '').trim();
 const macProjectRootFromBundle = macPackagedApp ? resolveMacProjectRootFromBundle(OS_DIR) : '';
 if (macPackagedApp && !macProjectRootFromBundle) {
@@ -67,11 +69,13 @@ const PROJECT_ROOT = path.resolve(
   (TEST_MODE && process.env.VIDEO_OS_TEST_PROJECT_ROOT)
   || macProjectRootFromBundle
   || explicitProjectRoot
+  || macPortableRoot
   || windowsRelease?.projectRoot
   || packagedProjectRoot
   || path.dirname(OS_DIR)
 );
 const configuredDataDir = process.env.VIDEO_OS_DATA_DIR
+  || (macPortable ? macProjectDataDir(PROJECT_ROOT) : '')
   || windowsRelease?.dataDir
   || (macPackagedApp ? macProjectDataDir(PROJECT_ROOT) : '')
   || (typeof RUNTIME_CONFIG.dataDir === 'string' && RUNTIME_CONFIG.dataDir.trim() ? RUNTIME_CONFIG.dataDir : '')

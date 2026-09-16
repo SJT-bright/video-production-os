@@ -32,7 +32,7 @@ function assertMacBundle(options = {}) {
   const projectRoot = path.resolve(options.projectRoot || '');
   const dataDir = path.resolve(options.dataDir || '');
   const arch = options.arch;
-  if (!['arm64', 'x64'].includes(arch)) throw new Error('macOS Bundle 验证需要 arm64 或 x64 架构');
+  if (!['arm64', 'x64', 'universal'].includes(arch)) throw new Error('macOS Bundle 架构无效');
   const contents = path.join(appBundle, 'Contents');
   const executable = path.join(contents, 'MacOS', EXECUTABLE_NAME);
   const plist = path.join(contents, 'Info.plist');
@@ -49,7 +49,8 @@ function assertMacBundle(options = {}) {
   if (displayName !== '视频制作 OS') throw new Error(`macOS 应用显示名称不匹配：${displayName || '空'}`);
   const expectedLipoArch = arch === 'x64' ? 'x86_64' : arch;
   const executableArchs = runMacTool('lipo', ['-archs', executable], 'macOS 主程序架构校验').split(/\s+/);
-  if (!executableArchs.includes(expectedLipoArch)) throw new Error(`macOS 主程序架构不是预期的 ${expectedLipoArch}`);
+  const expectedArchs = arch === 'universal' ? ['arm64', 'x86_64'] : [expectedLipoArch];
+  if (!expectedArchs.every(value => executableArchs.includes(value))) throw new Error(`macOS 主程序架构不是预期的 ${expectedArchs}`);
   runMacTool('/usr/bin/codesign', ['--verify', '--deep', '--strict', appBundle], 'macOS Bundle 签名校验');
 
   const verified = verifyPackagedApp({
@@ -60,12 +61,13 @@ function assertMacBundle(options = {}) {
     platform: 'darwin',
     arch,
     compatibilityMode: false,
+    portable: options.portable === true,
   });
   if (verified.runtimeConfig.projectRootFromBundle !== MAC_PROJECT_ROOT_FROM_APP) {
     throw new Error('macOS Bundle 缺少可重定位项目根目录契约');
   }
   const relocatedProjectRoot = path.resolve(appRoot, verified.runtimeConfig.projectRootFromBundle);
-  if (relocatedProjectRoot !== projectRoot) {
+  if (!options.portable && relocatedProjectRoot !== projectRoot) {
     throw new Error(`macOS Bundle 项目根目录回溯错误：期望 ${projectRoot}，实际 ${relocatedProjectRoot}`);
   }
   return {

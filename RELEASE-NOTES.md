@@ -1,4 +1,8 @@
-# v1.1.1 · 资产拖拽与创作工作台更新
+# v1.1.2 · Mac / Windows 独立下载版
+
+- Mac 新增独立安装版，支持 Apple 芯片和 Intel Mac；无需源码目录或 Node.js。
+- Mac 独立版素材和设置存放于用户 Application Support，不写入 App 包，替换应用保留数据。
+- Windows 提供完整 ZIP，解压后运行 EXE；两端包含下列工作台更新。
 
 - 移除左侧素材卡片的“传网页”按钮，卡片本身响应拖拽，补充视频和音频拖动图标。
 - 多选资产支持整批拖出；拖未选中的卡片仅拖出该文件，后台刷新保留仍存在的选中项。
@@ -19,6 +23,6 @@
 
 Windows：下载 `VideoProductionOS-Windows-x64.zip`，完整解压后双击 `视频制作OS.exe`，无需 Node.js。请勿只移动 EXE。
 
-macOS：本次主仓库提供最新源码，按 README 本地启动或构建 `.app`。不包含私人素材或会话。
+macOS：下载 `VideoProductionOS-Mac-Universal.zip`，解压后将 App 拖入“应用程序”。本包为本地签名，尚未经过 Apple 公证；首次打开可能需要在系统设置的“隐私与安全性”中确认允许。macOS 12 或以上。
 
 第三方生成仍在对应平台执行；MCP 上传与引用适配不等于完整生图／视频链路均已验收。剪映接入是导出目录联动，不是内嵌剪映。

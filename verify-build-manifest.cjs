@@ -94,9 +94,9 @@ function verifyPackagedApp(options = {}) {
   if (options.platform && manifest.platform !== options.platform) throw new Error('发行包平台与当前验证目标不一致');
   if (options.arch && manifest.arch !== options.arch) throw new Error('发行包架构与当前验证目标不一致');
   if (options.portable) {
-    if (runtimeConfig.dataLocation !== 'userData' || runtimeConfig.platform !== 'win32'
+    if (runtimeConfig.dataLocation !== 'userData' || !['win32', 'darwin'].includes(runtimeConfig.platform)
       || 'projectRoot' in runtimeConfig || 'dataDir' in runtimeConfig) {
-      throw new Error('Windows 下载包必须使用用户目录，不得包含构建机路径');
+      throw new Error('下载包必须使用用户目录，不得包含构建机路径');
     }
   } else {
     if (path.resolve(runtimeConfig.projectRoot || '') !== projectRoot) throw new Error('发行包项目根目录与当前项目不一致');

@@ -18,6 +18,7 @@ const DIST_ROOT = path.join(APP_DIR, 'dist');
 const PRODUCT_NAME = '视频制作 OS';
 const BUNDLE_ID = 'local.video-production-os';
 const packageInfo = require('./package.json');
+const PORTABLE_RELEASE = process.argv.includes('--portable');
 const execFileAsync = promisify(execFile);
 
 // Packager 18's legacy ZIP reader can stall under Node 26. macOS ditto is the
@@ -58,24 +59,30 @@ function collectSourceHashes() {
 async function build() {
   if (process.platform !== 'darwin') throw new Error('macOS .app 必须在真实 macOS 主机上构建；Windows 只维护构建脚本和静态契约。');
   const arch = readArg('--arch') || process.env.VIDEO_OS_MAC_ARCH || process.arch;
-  if (!['arm64', 'x64'].includes(arch)) throw new Error('macOS 构建仅支持 --arch arm64 或 --arch x64');
+  if (!['arm64', 'x64', 'universal'].includes(arch)) throw new Error('未知 macOS 架构');
   const electronVersion = require('./node_modules/electron/package.json').version;
   const { downloadArtifact } = await import('@electron/get');
   const electronZip = await downloadArtifact({
     version: electronVersion,
     platform: 'darwin',
-    arch,
+    arch: arch === 'universal' ? 'arm64' : arch,
     artifactName: 'electron',
     checksums: require('./node_modules/electron/checksums.json'),
   });
   if (!electronZip || !fs.existsSync(electronZip)) throw new Error('Electron macOS 运行时缓存不存在，请先运行安装桌面版依赖-mac.command');
+  if (arch === 'universal') {
+    await downloadArtifact({ version: electronVersion, platform: 'darwin', arch: 'x64', artifactName: 'electron',
+      checksums: require('./node_modules/electron/checksums.json') });
+  }
   const stageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'video-production-os-mac-'));
   try {
     for (const file of SOURCE_FILES) copyEntry(stageDir, file);
     for (const directory of SOURCE_DIRS) copyEntry(stageDir, directory);
     const runtimeConfig = {
-      projectRoot: PROJECT_ROOT,
-      dataDir: path.join(APP_DIR, 'data'),
+      ...(PORTABLE_RELEASE ? { dataLocation: 'userData' } : {
+        projectRoot: PROJECT_ROOT,
+        dataDir: path.join(APP_DIR, 'data'),
+      }),
       compatibilityMode: false,
       buildSchemaVersion: BUILD_SCHEMA_VERSION,
       platform: 'darwin',
@@ -91,7 +98,7 @@ async function build() {
     }, null, 2)}\n`, 'utf-8');
     const apps = await packager({
       dir: stageDir,
-      out: DIST_ROOT,
+      out: PORTABLE_RELEASE ? path.join(DIST_ROOT, 'public-release') : DIST_ROOT,
       name: PRODUCT_NAME,
       executableName: EXECUTABLE_NAME,
       platform: 'darwin', arch,
@@ -126,6 +133,7 @@ async function build() {
       projectRoot: PROJECT_ROOT,
       dataDir: path.join(APP_DIR, 'data'),
       arch,
+      portable: PORTABLE_RELEASE,
     });
     console.log(`MAC_BUILD_CANDIDATE_PASS ${appBundle}`);
   } finally {

@@ -24,7 +24,7 @@ const { isSafeBrowserAddress, normalizeBrowserAddress } = require('./browser-add
 const { createCreatorPlatformStore } = require('./creator-platforms.cjs');
 const { createBrowserSessionStore } = require('./browser-session.cjs');
 const { buildCreatorContextMenuTemplate } = require('./creator-context-menu.cjs');
-const { classifyDownload, resolveDownloadTarget } = require('./download-router.cjs');
+const { classifyDownload, resolveDownloadTarget, deleteBrowserDownloadFile } = require('./download-router.cjs');
 const { classifyCreativeAsset, ensureCreativeAssetRoot, resolveCreativeAsset, buildCreativeAssetTree } = require('../creative-assets.cjs');
 const { createCreatorAutomation, serveAutomation } = require('./creator-automation.cjs');
 const { resolveMacProjectRootFromBundle, macProjectDataDir } = require('./runtime-project-path.cjs');
@@ -142,6 +142,11 @@ const creatorPlatformStore = createCreatorPlatformStore({
   onWarning: message => console.warn(`[creator-platforms] ${message}`),
 });
 const ALLOWED_DOWNLOAD_ACTIONS = new Set(['pause', 'resume', 'cancel']);
+// 标签右键菜单动作白名单：渲染端只传条目描述，点击回调由主进程按这些 id 生成。
+const ALLOWED_TAB_MENU_ACTIONS = new Set([
+  'rename', 'duplicate', 'copy-url', 'pin', 'mute', 'restore',
+  'close-left', 'close-others', 'close-right', 'close',
+]);
 const browserSessionStore = createBrowserSessionStore({
   filePath: path.join(app.getPath('userData'), 'creator-browser-session.json'),
   onWarning: message => console.warn(`[browser-session] ${message}`),
@@ -152,7 +157,7 @@ let restoringBrowserSession = false;
 let closingWorkspace = false;
 let browserSessionRestored = false;
 let lastBrowserSnapshot = '';
-const ALLOWED_NAV_ACTIONS = new Set(['back', 'forward', 'reload', 'stop', 'home']);
+const ALLOWED_NAV_ACTIONS = new Set(['back', 'forward', 'reload', 'stop', 'home', 'hard-reload']);
 const ASSET_PANEL_MIN_WIDTH = 360;
 const ASSET_PANEL_MAX_WIDTH = 760;
 // 拖拽幻影兜底：视频等无法解码为图片的文件，用可见的深底+播放角标占位（1x1 透明图不可见，已弃用）
@@ -182,6 +187,8 @@ let downloadSequence = 0;
 // 会话分区仍按平台共享，保证同平台多窗口共用一次登录。
 const browserTabs = new Map();
 const lastModeTabs = { image: null, video: null };
+// 撤销关闭标签：用户逐个关闭的网页按时间入栈（最新在尾），Cmd/Ctrl+Shift+T 从尾恢复。
+const closedTabHistory = [];
 const downloadOwners = new WeakMap();
 const configuredSessions = new Set();
 const recentDownloads = [];
@@ -323,6 +330,7 @@ function creatorPaths() {
     creativeAssetLibraryRoot: CREATIVE_ASSET_DIR,
     creativeAssetAvailable: true,
     imageRoot: category('generated-images'),
+    downloadRoot: category('browser-downloads'),
     legacyImageRoot: vault ? path.join(vault, 'ai创作短剧', '韩剧制作', '浏览器生成') : '',
     obsidianAvailable: !!vault,
     diagnosticLog,
@@ -332,7 +340,12 @@ function creatorPaths() {
 function activeProjectDirectories() {
   const paths = creatorPaths();
   if (!paths.activeProject) throw new Error('请先选择一个剧本或灵感工作区');
-  return { image: paths.imageRoot, video: paths.materialRoot, audio: paths.audioRoot };
+  return {
+    image: paths.imageRoot,
+    video: paths.materialRoot,
+    audio: paths.audioRoot,
+    downloads: paths.downloadRoot,
+  };
 }
 
 function publicAssetPanelState() {
@@ -396,6 +409,11 @@ function publicTabs() {
     url: tab.currentUrl || safeServiceUrl(tab.serviceId),
     mode: tab.mode,
     active: tab.id === activeTabId,
+    pinned: !!tab.pinned,
+    audible: !!tab.audible,
+    muted: !!(tab.view && !tab.view.webContents.isDestroyed()
+      && typeof tab.view.webContents.isAudioMuted === 'function'
+      && tab.view.webContents.isAudioMuted()),
   }));
 }
 
@@ -461,6 +479,7 @@ function persistBrowserSession() {
     tabs: [...browserTabs.values()].map(tab => ({
       id: tab.id, serviceId: tab.serviceId, mode: tab.mode,
       url: tab.currentUrl || safeServiceUrl(tab.serviceId), customName: tab.customName || '',
+      pinned: !!tab.pinned,
     })),
   };
   const serialized = JSON.stringify(snapshot);
@@ -481,6 +500,7 @@ function restoreBrowserSession() {
         if (!validServiceForMode(item.mode, item.serviceId)) continue;
         createTab(item.serviceId, item.mode, {
           activate: false, id: item.id, initialUrl: item.url, customName: item.customName, deferLoad: true,
+          pinned: !!item.pinned,
         });
       }
       for (const mode of ['image', 'video']) {
@@ -527,6 +547,152 @@ function clearBrowserTabs() {
   try { for (const tab of [...browserTabs.values()]) destroyTab(tab); }
   finally { restoringBrowserSession = false; }
   return showEmptyBrowserMode(activeMode);
+}
+
+// 标签拖拽换位：{ swapTabId, withTabId } 互换两个标签的位置；
+// { moveTabId, beforeTabId } 把标签移动到 beforeTabId 之前（beforeTabId 为空＝移到末尾）。
+// 只调整 browserTabs 的键顺序，不触碰视图、激活状态与登录；pushBrowserState 负责广播和持久化新顺序。
+function reorderBrowserTabs(payload = {}) {
+  const swapTabId = String(payload.swapTabId || '');
+  const withTabId = String(payload.withTabId || '');
+  const moveTabId = String(payload.moveTabId || '');
+  const beforeTabId = String(payload.beforeTabId || '');
+  const reordered = new Map();
+  if (swapTabId && withTabId) {
+    const first = tabById(swapTabId);
+    const second = tabById(withTabId);
+    if (!first || !second) throw new Error('这个网页已关闭');
+    // 标签顺序由 Map 的键插入顺序决定：互换＝在各自位置放入对方的键和值（键与 tab.id 必须保持一致）
+    if (first.id !== second.id) {
+      for (const [id, tab] of browserTabs) {
+        if (id === first.id) reordered.set(second.id, second);
+        else if (id === second.id) reordered.set(first.id, first);
+        else reordered.set(id, tab);
+      }
+    }
+  } else if (moveTabId) {
+    const moving = tabById(moveTabId);
+    if (!moving) throw new Error('这个网页已关闭');
+    const anchor = beforeTabId ? tabById(beforeTabId) : null;
+    if (beforeTabId && !anchor) throw new Error('目标网页已关闭');
+    if (!anchor) {
+      for (const [id, tab] of browserTabs) if (id !== moving.id) reordered.set(id, tab);
+      reordered.set(moving.id, moving);
+    } else if (anchor.id !== moving.id) {
+      // anchor === moving ＝拖回自己原来的位置，保持顺序不变
+      for (const [id, tab] of browserTabs) {
+        if (id === moving.id) continue;
+        if (id === anchor.id) reordered.set(moving.id, moving);
+        reordered.set(id, tab);
+      }
+      if (!reordered.has(moving.id)) reordered.set(moving.id, moving);
+    }
+  } else {
+    throw new Error('缺少要移动的网页');
+  }
+  if (reordered.size && [...browserTabs.keys()].join('\n') !== [...reordered.keys()].join('\n')) {
+    // 未固定标签拖到固定标签前面时，钳制回固定组之后，保持“固定组永远在最前”的不变量
+    stabilizePinnedTabsOrder(reordered);
+    browserTabs.clear();
+    for (const [id, tab] of reordered) browserTabs.set(id, tab);
+  }
+  pushBrowserState();
+  return browserState();
+}
+
+// —— 浏览器级标签操作（对标 Chrome 的循环切换 / 撤销关闭 / 固定标签 / 静音 / 关闭其他）——
+
+// 把固定标签稳定排在最前：任何重排之后跑一遍稳定分区，保持两组内部相对顺序不变。
+function stabilizePinnedTabsOrder(map) {
+  const list = [...map.entries()];
+  map.clear();
+  for (const [id, item] of list) if (item.pinned) map.set(id, item);
+  for (const [id, item] of list) if (!item.pinned) map.set(id, item);
+}
+
+function cycleBrowserTab(offset) {
+  const ids = [...browserTabs.values()]
+    .filter(tab => tab.mode === activeMode && validServiceForMode(activeMode, tab.serviceId))
+    .map(tab => tab.id);
+  if (ids.length < 2) return browserState();
+  const index = ids.indexOf(activeTabId);
+  const nextId = ids[index === -1 ? 0 : (index + offset + ids.length) % ids.length];
+  return activateTab(nextId);
+}
+
+function restoreClosedTab() {
+  // 只恢复当前创作模式的标签：跨模式恢复会把主进程切到另一个模式，
+  // 渲染端 applyBrowserState 会因模式不一致而忽略推送，界面就不同步了。
+  // 其他模式的关闭记录留在栈里，用户切回该模式仍可恢复。
+  const index = [...closedTabHistory].reverse()
+    .findIndex(entry => entry.mode === activeMode && validServiceForMode(entry.mode, entry.serviceId));
+  if (index === -1) {
+    sendCreator('creator:notice', '当前模式下没有可以恢复的已关闭网页');
+    return browserState();
+  }
+  const entry = closedTabHistory.splice(closedTabHistory.length - 1 - index, 1)[0];
+  const anchorId = activeTabId;
+  const tab = createTab(entry.serviceId, entry.mode, {
+    activate: true, initialUrl: entry.url, customName: entry.customName, pinned: !!entry.pinned,
+  });
+  // 恢复的标签插回关闭前的活动位置旁边（对标 Chrome 的 Ctrl+Shift+T）
+  if (anchorId && anchorId !== tab.id && browserTabs.has(anchorId)) {
+    const remaining = [...browserTabs.entries()].filter(([tabId]) => tabId !== tab.id);
+    browserTabs.clear();
+    let inserted = false;
+    for (const [tabId, item] of remaining) {
+      browserTabs.set(tabId, item);
+      if (!inserted && tabId === anchorId) { browserTabs.set(tab.id, tab); inserted = true; }
+    }
+    if (!inserted) browserTabs.set(tab.id, tab);
+  }
+  stabilizePinnedTabsOrder(browserTabs);
+  pushBrowserState();
+  sendCreator('creator:notice', `已重新打开「${serviceTabLabel(tab)}」`);
+  return browserState();
+}
+
+function setTabPinned(tabId, pinned) {
+  const tab = tabById(tabId);
+  if (!tab) throw new Error('这个网页已关闭');
+  tab.pinned = !!pinned;
+  stabilizePinnedTabsOrder(browserTabs);
+  pushBrowserState();
+  return browserState();
+}
+
+function setTabMuted(tabId, muted) {
+  const tab = tabById(tabId);
+  if (!tab) throw new Error('这个网页已关闭');
+  if (!tab.view.webContents.isDestroyed()) tab.view.webContents.setAudioMuted(!!muted);
+  pushBrowserState();
+  return browserState();
+}
+
+// 关闭其他 / 左侧 / 右侧：只作用于同一创作模式的标签，
+// 有进行中下载的平台先跳过，避免打断下载；活动标签被关掉时回到锚点标签。
+function closeOtherTabs(anchorId, scope) {
+  const anchor = tabById(anchorId);
+  if (!anchor) throw new Error('这个网页已关闭');
+  const ids = [...browserTabs.values()].filter(tab => tab.mode === anchor.mode).map(tab => tab.id);
+  const targets = scope === 'right'
+    ? ids.slice(ids.indexOf(anchor.id) + 1)
+    : scope === 'left' ? ids.slice(0, ids.indexOf(anchor.id)) : ids.filter(id => id !== anchor.id);
+  const downloading = new Set([...activeDownloadItems.values()]
+    .filter(transfer => ['progressing', 'paused'].includes(transfer.record?.state))
+    .map(transfer => transfer.record?.serviceId).filter(Boolean));
+  let closed = 0;
+  for (const id of targets.reverse()) {
+    const tab = tabById(id);
+    if (!tab || downloading.has(tab.serviceId)) continue;
+    closedTabHistory.push({ serviceId: tab.serviceId, mode: tab.mode, url: tab.currentUrl, customName: tab.customName, pinned: !!tab.pinned });
+    if (closedTabHistory.length > 10) closedTabHistory.shift();
+    destroyTab(tab);
+    closed++;
+  }
+  if (!tabById(activeTabId)) activateTab(anchor.id);
+  else pushBrowserState();
+  return { ...browserState(), closed };
 }
 
 function publicDownload(record) {
@@ -1004,7 +1170,7 @@ function installCreatorContextMenu(contents, ownerWindow = creatorWindow) {
   });
 }
 
-function createTab(serviceId, mode, { activate = true, id, initialUrl, customName = '', deferLoad = false } = {}) {
+function createTab(serviceId, mode, { activate = true, id, initialUrl, customName = '', deferLoad = false, pinned = false } = {}) {
   if (!creatorWindow || creatorWindow.isDestroyed()) throw new Error('创作浏览器尚未打开');
   const safeMode = modeOrDefault(mode);
   if (!validServiceForMode(safeMode, serviceId)) throw new Error('该平台不属于当前创作模式');
@@ -1025,6 +1191,56 @@ function createTab(serviceId, mode, { activate = true, id, initialUrl, customNam
   });
   const contents = view.webContents;
   installCreatorContextMenu(contents);
+  // 标签声音角标：网页开始/停止出声时轻量广播（不落盘），驱动标签上的 🔊/🔇 角标。
+  contents.on('audio-state-changed', () => {
+    tab.audible = !contents.isDestroyed() && contents.isCurrentlyAudible();
+    sendCreator('creator:browser-state', browserState());
+  });
+  // 页内查找结果回传（Ctrl/Cmd+F 查找条显示“第几个/共几个”）
+  contents.on('found-in-page', (_event, result) => {
+    sendCreator('creator:find-result', {
+      activeMatchOrdinal: result.activeMatchOrdinal || 0,
+      matches: result.matches || 0,
+    });
+  });
+  // 浏览器级快捷键在平台页面聚焦时依然可用：主进程在这里拦截，
+  // 宿主页聚焦时的同名快捷键由 creator.js 的 keydown 处理，两条路径互不叠加。
+  // Cmd/Ctrl+W 必须在这里拦截为“关闭当前标签”，否则会命中 macOS 窗口菜单的
+  // close 角色，把整个工作台窗口关掉。
+  contents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown' || input.alt) return;
+    const mod = process.platform === 'darwin' ? input.meta : input.control;
+    if (!mod) return;
+    const key = String(input.key || '').toLowerCase();
+    try {
+      if (key === 'tab') {
+        event.preventDefault();
+        cycleBrowserTab(input.shift ? -1 : 1);
+      } else if (input.shift && key === 't') {
+        event.preventDefault();
+        restoreClosedTab();
+      } else if (input.shift && key === 'r') {
+        event.preventDefault();
+        const current = tabById(activeTabId);
+        if (current && !current.view.webContents.isDestroyed()) current.view.webContents.reloadIgnoringCache();
+      } else if (!input.shift && key === 'r') {
+        event.preventDefault();
+        const current = tabById(activeTabId);
+        if (current && !current.view.webContents.isDestroyed()) current.view.webContents.reload();
+      } else if (key === 'w') {
+        event.preventDefault();
+        closeTab(tab.id);
+      } else if (!input.shift && key === 'l') {
+        event.preventDefault();
+        sendCreator('creator:focus-address');
+      } else if (!input.shift && key === 'f') {
+        event.preventDefault();
+        sendCreator('creator:show-find-bar');
+      }
+    } catch (error) {
+      logDiagnostic('tab-shortcut', error.message || String(error));
+    }
+  });
   // 用户点击网页时收起覆盖式资产库；不拦截原点击，网页按钮和输入框仍可直接操作。
   contents.on('before-mouse-event', (_event, input) => {
     if (input.type === 'mouseDown' && contents === activeView?.webContents) dismissAssetOverlay();
@@ -1050,6 +1266,8 @@ function createTab(serviceId, mode, { activate = true, id, initialUrl, customNam
     mode: safeMode,
     currentUrl: isSafeWebUrl(initialUrl) ? initialUrl : serviceUrl(serviceId),
     customName,
+    pinned: !!pinned,
+    audible: false,
     needsLoad: deferLoad,
     view,
     session: ses,
@@ -1210,6 +1428,9 @@ function closeTab(tabId) {
   const ids = [...browserTabs.values()].filter(candidate => candidate.mode === tab.mode).map(candidate => candidate.id);
   const index = ids.indexOf(tab.id);
   const wasActive = tab.id === activeTabId;
+  // 撤销关闭：只记录用户逐个关闭的网页（清空/批量清理走 destroyTab，不入栈）
+  closedTabHistory.push({ serviceId: tab.serviceId, mode: tab.mode, url: tab.currentUrl, customName: tab.customName, pinned: !!tab.pinned });
+  if (closedTabHistory.length > 10) closedTabHistory.shift();
   destroyTab(tab);
   if (wasActive) {
     const nextId = ids[index + 1] || ids[index - 1] || null;
@@ -1563,11 +1784,61 @@ function requireCreativeAsset(relativePath, expectedType = '') {
     throw new Error('资产不属于当前剧本');
   }
   const entry = resolveCreativeAsset(CREATIVE_ASSET_DIR, requested, 'file');
-  const type = entry && classifyCreativeAsset(entry.rel);
-  if (!entry || !type || (expectedType && type !== expectedType)) {
+  const type = entry ? (classifyCreativeAsset(entry.rel) || 'other') : '';
+  if (!entry || (expectedType && type !== expectedType)) {
     throw new Error(expectedType === 'image' ? '图片不存在或不在创作资产库内' : '资产不存在或不在创作资产库内');
   }
   return { absolutePath: entry.abs, type };
+}
+
+function pathIsInside(root, target) {
+  if (!root || !target) return false;
+  let realRoot;
+  let realTarget;
+  try {
+    realRoot = fs.realpathSync(root);
+    realTarget = fs.realpathSync(target);
+  } catch {
+    return false;
+  }
+  const relative = path.relative(realRoot, realTarget);
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+function allowedDownloadRevealPath(savePath) {
+  if (!savePath || !fs.existsSync(savePath)) return '';
+  const roots = [PROJECT_ROOT, CREATIVE_ASSET_DIR, OBSIDIAN_VAULT].filter(Boolean);
+  return roots.some(root => pathIsInside(root, savePath)) ? savePath : '';
+}
+
+function lookupDownloadSavePath(downloadId) {
+  const id = String(downloadId || '');
+  if (!id) return '';
+  const recent = recentDownloads.find(item => item.id === id);
+  if (recent?.savePath) return recent.savePath;
+  if (!productionStore || typeof productionStore.listInbox !== 'function') return '';
+  try {
+    const row = productionStore.listInbox({ limit: 200, includeDismissed: true })
+      .find(item => item.download_key === id);
+    return row?.asset_path || '';
+  } catch {
+    return '';
+  }
+}
+
+function resolveDragAbsolute(token) {
+  const value = String(token || '').replace(/\\/g, '/');
+  if (value.startsWith('download:')) {
+    const savePath = allowedDownloadRevealPath(lookupDownloadSavePath(value.slice('download:'.length)));
+    if (!savePath) throw new Error('这个下载还不能拖出');
+    return savePath;
+  }
+  if (value.startsWith('dl:')) {
+    const savePath = allowedDownloadRevealPath(lookupDownloadSavePath(value.slice(3)));
+    if (!savePath) throw new Error('这个下载还不能拖出');
+    return savePath;
+  }
+  return requireCreativeAsset(value).absolutePath;
 }
 
 function dragIconFor(absolutePath) {
@@ -1818,6 +2089,58 @@ function registerIpc() {
     return selectTab(String(payload.tabId || ''));
   });
 
+  ipcMain.handle('creator:reorder-tabs', (event, payload = {}) => {
+    requireTrusted(event, 'creator');
+    return reorderBrowserTabs(payload);
+  });
+
+  ipcMain.handle('creator:pin-tab', (event, payload = {}) => {
+    requireTrusted(event, 'creator');
+    return setTabPinned(String(payload.tabId || ''), !!payload.pinned);
+  });
+
+  ipcMain.handle('creator:set-tab-muted', (event, payload = {}) => {
+    requireTrusted(event, 'creator');
+    return setTabMuted(String(payload.tabId || ''), !!payload.muted);
+  });
+
+  ipcMain.handle('creator:restore-closed-tab', event => {
+    requireTrusted(event, 'creator');
+    return restoreClosedTab();
+  });
+
+  ipcMain.handle('creator:close-other-tabs', (event, payload = {}) => {
+    requireTrusted(event, 'creator');
+    const scope = ['left', 'right'].includes(payload.scope) ? payload.scope : 'others';
+    return closeOtherTabs(String(payload.tabId || ''), scope);
+  });
+
+  ipcMain.handle('creator:cycle-tab', (event, payload = {}) => {
+    requireTrusted(event, 'creator');
+    const offset = Number(payload.offset) < 0 ? -1 : 1;
+    return cycleBrowserTab(offset);
+  });
+
+  ipcMain.handle('creator:find-in-page', (event, payload = {}) => {
+    requireTrusted(event, 'creator');
+    if (!activeView || activeView.webContents.isDestroyed()) throw new Error('没有可查找的网页');
+    const text = String(payload.text || '');
+    if (!text) {
+      activeView.webContents.stopFindInPage('clearSelection');
+      return { matches: 0 };
+    }
+    activeView.webContents.findInPage(text, { forward: payload.forward !== false, findNext: !!payload.findNext });
+    return true;
+  });
+
+  ipcMain.handle('creator:find-stop', (event, keepSelection = false) => {
+    requireTrusted(event, 'creator');
+    if (activeView && !activeView.webContents.isDestroyed()) {
+      activeView.webContents.stopFindInPage(keepSelection ? 'keepSelection' : 'clearSelection');
+    }
+    return true;
+  });
+
   ipcMain.handle('creator:close-tab', (event, payload = {}) => {
     requireTrusted(event, 'creator');
     return closeTab(String(payload.tabId || ''));
@@ -1844,6 +2167,7 @@ function registerIpc() {
     if (action === 'back' && contents.navigationHistory.canGoBack()) contents.navigationHistory.goBack();
     else if (action === 'forward' && contents.navigationHistory.canGoForward()) contents.navigationHistory.goForward();
     else if (action === 'reload') contents.reload();
+    else if (action === 'hard-reload') contents.reloadIgnoringCache();
     else if (action === 'stop') {
       // 只对“原加载已经超时”的停止给出后续说明；普通页面的停止不误报超时。
       const stoppedTab = tabById(activeTabId);
@@ -1950,6 +2274,21 @@ function registerIpc() {
     return true;
   });
 
+  ipcMain.handle('creator:delete-browser-download', async (event, payload = {}) => {
+    requireTrusted(event, 'creator');
+    requireCreativeAsset(String(payload.path || ''));
+    const removedPath = await deleteBrowserDownloadFile({
+      libraryRoot: CREATIVE_ASSET_DIR,
+      downloadsRoot: creatorPaths().downloadRoot,
+      relativePath: String(payload.path || ''),
+    });
+    for (let index = recentDownloads.length - 1; index >= 0; index--) {
+      if (recentDownloads[index].savePath === removedPath) recentDownloads.splice(index, 1);
+    }
+    serverModule.broadcastCreativeAssets?.();
+    return true;
+  });
+
   ipcMain.handle('creator:page-zoom', (event, payload = {}) => {
     requireTrusted(event, 'creator');
     // 当前网页缩放：in / out / reset，与标准浏览器一致（步进 0.5，范围 ±3）。
@@ -1976,9 +2315,24 @@ function registerIpc() {
 
   ipcMain.handle('creator:open-download', async (event, downloadId) => {
     requireTrusted(event, 'creator');
-    const record = recentDownloads.find(item => item.id === downloadId);
-    if (!record || !fs.existsSync(record.savePath)) return false;
-    shell.showItemInFolder(record.savePath);
+    const id = String(downloadId || '');
+    let savePath = recentDownloads.find(item => item.id === id)?.savePath || '';
+    if (!savePath && productionStore) {
+      const row = productionStore.listInbox({ limit: 200, includeDismissed: true })
+        .find(item => item.download_key === id);
+      savePath = row?.asset_path || '';
+    }
+    savePath = allowedDownloadRevealPath(savePath);
+    if (!savePath) return false;
+    shell.showItemInFolder(savePath);
+    return true;
+  });
+
+  ipcMain.handle('creator:show-creative-asset', (event, payload = {}) => {
+    requireTrusted(event, 'creator');
+    const { absolutePath } = requireCreativeAsset(String(payload.path || ''));
+    if (!allowedDownloadRevealPath(absolutePath)) return false;
+    shell.showItemInFolder(absolutePath);
     return true;
   });
 
@@ -2073,6 +2427,70 @@ function registerIpc() {
     return true;
   });
 
+  // 标签右键菜单用系统原生 Menu.popup：DOM 浮层会被上层 WebContentsView 内嵌网页盖住，
+  // 原生菜单由操作系统绘制，永远显示在最上层。渲染端只传条目描述与弹出坐标。
+  ipcMain.handle('creator:show-tab-menu', async (event, payload = {}) => {
+    requireTrusted(event, 'creator');
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('标签菜单参数无效');
+    const owner = creatorWindow;
+    if (!owner || owner.isDestroyed()) return { cancelled: true };
+    const zoom = event.sender.getZoomFactor();
+    const [width, height] = owner.getContentSize();
+    const x = Number.isFinite(payload.x) ? Math.max(0, Math.min(width - 1, Math.round(payload.x * zoom))) : 0;
+    const y = Number.isFinite(payload.y) ? Math.max(0, Math.min(height - 1, Math.round(payload.y * zoom))) : 40;
+    const rawItems = Array.isArray(payload.items) ? payload.items.slice(0, 24) : [];
+    const entries = [];
+    for (const raw of rawItems) {
+      if (!raw || typeof raw !== 'object') continue;
+      if (raw.separator) {
+        // 连续分隔线与首尾多余分隔线都收掉，保持原生菜单干净。
+        if (entries.length && !entries[entries.length - 1].separator) entries.push({ separator: true });
+        continue;
+      }
+      const id = typeof raw.id === 'string' ? raw.id : '';
+      const label = typeof raw.label === 'string' ? raw.label.slice(0, 60) : '';
+      if (!ALLOWED_TAB_MENU_ACTIONS.has(id) || !label) continue;
+      entries.push({
+        separator: false,
+        id,
+        label,
+        enabled: raw.enabled !== false,
+        accelerator: typeof raw.accelerator === 'string' && raw.accelerator.length <= 40 ? raw.accelerator : '',
+      });
+    }
+    while (entries.length && entries[entries.length - 1].separator) entries.pop();
+    if (!entries.some(item => !item.separator)) return { cancelled: true };
+    const action = await new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = value => {
+        if (settled) return;
+        settled = true;
+        owner.removeListener('closed', onClosed);
+        resolve(value);
+      };
+      const onClosed = () => finish(null);
+      owner.once('closed', onClosed);
+      try {
+        const menu = Menu.buildFromTemplate(entries.map(item => item.separator ? { type: 'separator' } : {
+          label: item.label,
+          enabled: item.enabled,
+          ...(item.accelerator ? { accelerator: item.accelerator, registerAccelerator: false } : {}),
+          click: () => finish(item.id),
+        }));
+        menu.popup({
+          window: owner, x, y,
+          // Let the selected item's click arrive before treating dismissal as cancel.
+          callback: () => setImmediate(() => finish(null)),
+        });
+      } catch (error) {
+        owner.removeListener('closed', onClosed);
+        reject(error);
+      }
+    });
+    if (!action) return { cancelled: true };
+    return { action };
+  });
+
   ipcMain.handle('creator:get-downloads', event => {
     requireTrusted(event, 'creator');
     const activeProjectId = creativeProjectStore.active()?.id || '';
@@ -2117,7 +2535,7 @@ function registerIpc() {
       if (!requested.length) throw new Error('缺少资产路径');
       if (requested.length > 100) throw new Error('一次最多拖拽 100 个文件');
       const absolutePaths = requested.map(rel => {
-        const { absolutePath } = requireCreativeAsset(rel);
+        const absolutePath = resolveDragAbsolute(rel);
         if (fs.statSync(absolutePath).size > 20 * 1024 * 1024 * 1024) throw new Error(`${rel} 超过 20 GB，拒绝直接拖拽`);
         return absolutePath;
       });
@@ -2365,7 +2783,9 @@ if (!gotSingleInstanceLock) {
     }
     // 剪映联动：全局快捷键 Alt+Shift+D 开关悬浮拖拽窗（剪映在前台时也能呼出/收起，不抢焦点）
     try {
-      globalShortcut.register('Alt+Shift+D', () => { try { toggleDragTrayWindow(); } catch {} });
+      // register 返回 false = 快捷键被剪映或其他应用占用：记录诊断，便于排查「按了没反应」
+      const registered = globalShortcut.register('Alt+Shift+D', () => { try { toggleDragTrayWindow(); } catch {} });
+      if (!registered) logDiagnostic('global-shortcut', 'Alt+Shift+D 注册失败：快捷键可能被其他应用占用');
     } catch (error) { logDiagnostic('global-shortcut', error); }
     app.on('will-quit', () => { try { globalShortcut.unregisterAll(); } catch {} });
     if (SMOKE_TEST) {
@@ -2727,6 +3147,70 @@ if (!gotSingleInstanceLock) {
           );
           multiTabHealth.afterClose = browserTabs.size;
           multiTabHealth.activeAfterClose = activeServiceId;
+          // 拖拽换位：swap 互换与 move 移到末尾都要改写 browserTabs 顺序、反映到返回值，并广播到界面标签栏 DOM。
+          const orderBeforeReorder = [...browserTabs.keys()];
+          if (orderBeforeReorder.length >= 2) {
+            const domTabIds = () => creatorWindow.webContents.executeJavaScript(
+              "[...document.querySelectorAll('#platformTabs .platform-tab')].map(button => button.dataset.tabId)"
+            );
+            // 界面只显示当前模式的标签：DOM 顺序应与全局顺序按当前模式过滤后的结果一致
+            const visibleIds = order => order.filter(id => {
+              const tab = browserTabs.get(id);
+              return tab && tab.mode === activeMode && validServiceForMode(activeMode, tab.serviceId);
+            });
+            const waitDomOrder = async expected => {
+              const expectedDom = visibleIds(expected).join('\n');
+              let domIds = [];
+              for (let i = 0; i < 40; i++) {
+                domIds = await domTabIds();
+                if (domIds.join('\n') === expectedDom) break;
+                await new Promise(resolve => setTimeout(resolve, 50));
+              }
+              return domIds.join('\n') === expectedDom;
+            };
+            const expectedSwapped = [orderBeforeReorder[1], orderBeforeReorder[0], ...orderBeforeReorder.slice(2)];
+            const swapped = await creatorWindow.webContents.executeJavaScript(
+              `window.creatorAPI.reorderTabs({ swapTabId: ${JSON.stringify(orderBeforeReorder[0])}, withTabId: ${JSON.stringify(orderBeforeReorder[1])} })`
+            );
+            multiTabHealth.reorderSwapped = [...browserTabs.keys()].join('\n') === expectedSwapped.join('\n')
+              && (swapped?.tabs || []).map(tab => tab.id).join('\n') === expectedSwapped.join('\n')
+              && await waitDomOrder(expectedSwapped);
+            const expectedMoved = expectedSwapped.filter(id => id !== orderBeforeReorder[1]).concat(orderBeforeReorder[1]);
+            const movedBack = await creatorWindow.webContents.executeJavaScript(
+              `window.creatorAPI.reorderTabs({ moveTabId: ${JSON.stringify(orderBeforeReorder[1])}, beforeTabId: '' })`
+            );
+            multiTabHealth.reorderMovedToEnd = [...browserTabs.keys()].join('\n') === expectedMoved.join('\n')
+              && (movedBack?.tabs || []).map(tab => tab.id).join('\n') === expectedMoved.join('\n')
+              && await waitDomOrder(expectedMoved);
+          } else {
+            multiTabHealth.reorderSwapped = false;
+            multiTabHealth.reorderMovedToEnd = false;
+          }
+          // 浏览器级标签能力：固定置顶、一键静音、撤销关闭
+          const pinTargetId = [...browserTabs.keys()][0];
+          await creatorWindow.webContents.executeJavaScript(
+            `window.creatorAPI.pinTab(${JSON.stringify(pinTargetId)}, true)`
+          );
+          multiTabHealth.pinnedFront = [...browserTabs.keys()][0] === pinTargetId
+            && browserTabs.get(pinTargetId).pinned === true;
+          multiTabHealth.muteToggled = await creatorWindow.webContents.executeJavaScript(
+            `window.creatorAPI.setTabMuted(${JSON.stringify(pinTargetId)}, true).then(state => !!state.tabs.find(tab => tab.id === ${JSON.stringify(pinTargetId)}).muted)`
+          );
+          const closeForUndoId = [...browserTabs.keys()].find(id => id !== pinTargetId);
+          const sizeBeforeUndo = browserTabs.size;
+          await creatorWindow.webContents.executeJavaScript(
+            `window.creatorAPI.closeTab(${JSON.stringify(closeForUndoId)})`
+          );
+          const restoredState = await creatorWindow.webContents.executeJavaScript(
+            'window.creatorAPI.restoreClosedTab()'
+          );
+          multiTabHealth.restoreClosed = browserTabs.size === sizeBeforeUndo && !!restoredState?.tabId;
+          await creatorWindow.webContents.executeJavaScript(
+            `window.creatorAPI.pinTab(${JSON.stringify(pinTargetId)}, false)`
+          );
+          await creatorWindow.webContents.executeJavaScript(
+            `window.creatorAPI.setTabMuted(${JSON.stringify(pinTargetId)}, false)`
+          );
           // 使用真实网页实例验证双模式隔离，不能只检查标签文字。
           const videoTab = tabById(activeTabId);
           for (let i = 0; i < 80 && videoTab.view.webContents.isLoading(); i++) await new Promise(resolve => setTimeout(resolve, 25));
@@ -2866,6 +3350,8 @@ if (!gotSingleInstanceLock) {
             || !assetUi.folderCount || pushPanel.layout !== 'push' || overlayPanel.layout !== 'overlay'
             || pushBrowserBounds.width >= overlayBrowserBounds.width || !fixtureViews.length
             || multiTabHealth.afterOpen !== 3 || multiTabHealth.afterClose !== 2 || multiTabHealth.activeAfterClose !== 'gpt'
+            || !multiTabHealth.reorderSwapped || !multiTabHealth.reorderMovedToEnd
+            || !multiTabHealth.pinnedFront || !multiTabHealth.muteToggled || !multiTabHealth.restoreClosed
             || !multiTabHealth.adjacent || !multiTabHealth.patchApplied
             || !multiTabHealth.loadTimeoutMarked || !multiTabHealth.loadTimeoutCleared
             || !multiTabHealth.stopAfterTimeoutGuided || !multiTabHealth.stoppedNoteCleared

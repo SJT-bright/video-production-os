@@ -63,11 +63,27 @@ function assetBadge(item) {
   const shortDate = month ? `${Number(month)}/${Number(day)}` : '';
   const fullDate = year ? `${year}-${month}-${day}` : '';
   return {
+    date: fullDate,
     text: [seq && `#${seq}`, shortDate].filter(Boolean).join(' '),
     title: fullDate
       ? (seq ? `全部资产索引：${stem} · 生成日期 ${fullDate}` : `生成日期 ${fullDate}`)
       : (seq ? `全部资产索引：${stem}` : ''),
   };
+}
+
+function newestFirst(a, b) {
+  return assetBadge(b).date.localeCompare(assetBadge(a).date)
+    || ((Date.parse(b.mtime) || 0) - (Date.parse(a.mtime) || 0))
+    || b.name.localeCompare(a.name, 'zh-CN', { numeric: true });
+}
+
+let coverObserver = null;
+function releaseCovers() {
+  if (coverObserver) coverObserver.disconnect();
+  el.trayList.querySelectorAll('video').forEach(video => {
+    video.removeAttribute('src');
+    video.load();
+  });
 }
 
 // 请求代号守卫：快速切换项目/连续刷新时，后完成的旧响应不得覆盖新渲染；
@@ -76,6 +92,7 @@ let libraryRequestId = 0;
 
 async function loadAssets() {
   const requestId = ++libraryRequestId;
+  releaseCovers();
   el.trayList.replaceChildren(Object.assign(document.createElement('div'), { className: 'tray-state', textContent: '正在读取资产…' }));
   try {
     // 先取 active 项目确定身份，再带明确 project 参数请求资产（API 按 project 返回对应剧本树）
@@ -84,8 +101,10 @@ async function loadAssets() {
     if (requestId !== libraryRequestId) return;
     const project = (projects.projects || []).find(item => item.id === projects.activeProjectId) || null;
     const newProjectId = projects.activeProjectId || 'inspiration';
-    const projectChanged = window.__trayProjectId !== newProjectId;
-    // 项目切换或资产被删除后，清掉不再存在的选入项，避免整批拖出失败；切换清空要给出提示
+    // 项目切换或资产被删除后，清掉不再存在的选入项，避免整批拖出失败；切换清空要给出提示。
+    // 注意：projectChanged 只允许在“上一轮已完成渲染的项目”与本次不同时为真；
+    // 首次加载没有旧项目，不算切换。
+    const projectChanged = window.__trayProjectId != null && window.__trayProjectId !== newProjectId;
     if (projectChanged && selectionOrder.length) {
       showToast(`已切换到「${project ? project.name : '灵感生成'}」，原选中 ${selectionOrder.length} 项已清空`);
       selectionOrder.length = 0;
@@ -96,10 +115,13 @@ async function loadAssets() {
     el.trayProject.textContent = project ? project.name : '灵感生成';
     const assetsResp = await fetch(`/api/creative-assets?project=${encodeURIComponent(newProjectId)}`, { cache: 'no-store' });
     const assets = await assetsResp.json();
-    if (requestId !== libraryRequestId || activeProjectId() !== newProjectId) return;
+    // 只用请求代号防串台：项目切换一定会触发新的 loadAssets（SSE creative-projects），
+    // 旧响应由代号守卫丢弃。这里绝不能再对比旧项目 ID，否则项目一切换本次渲染必然自弃，
+    // 悬浮窗将永久卡在旧项目列表上，后续每次拖拽都被主进程以「资产不属于当前剧本」拒绝。
+    if (requestId !== libraryRequestId) return;
     const files = [];
     flattenAssets(assets.tree, files);
-    state.assets = files;
+    state.assets = files.sort(newestFirst);
     const existing = new Set(files.map(item => item.path));
     const before = selectionOrder.length;
     if (before) {
@@ -151,7 +173,15 @@ function renderList() {
   const files = state.assets.filter(item => item.type === state.filter);
   renderLog.push(`selectMode=${selectMode} sel=${selectionOrder.length} files=${files.length}`);
   if (renderLog.length > 6) renderLog.shift();
+  releaseCovers();
   el.trayList.replaceChildren();
+  coverObserver = new IntersectionObserver(entries => {
+    entries.forEach(({ target, isIntersecting }) => {
+      if (!isIntersecting) return;
+      target.src = target.dataset.src;
+      coverObserver.unobserve(target);
+    });
+  }, { root: el.trayList, rootMargin: '120px' });
   if (!files.length) {
     el.trayList.appendChild(Object.assign(document.createElement('div'), { className: 'tray-state', textContent: '该类型暂无资产' }));
     return;
@@ -190,6 +220,22 @@ function renderList() {
     const thumb = document.createElement('span');
     thumb.className = 'tray-thumb';
     thumb.textContent = item.type === 'video' ? '▶' : '♪';
+    if (item.type === 'video') {
+      const cover = document.createElement('video');
+      cover.className = 'tray-cover';
+      cover.muted = true;
+      cover.defaultMuted = true;
+      cover.playsInline = true;
+      cover.preload = 'auto';
+      cover.draggable = false;
+      cover.tabIndex = -1;
+      cover.setAttribute('aria-hidden', 'true');
+      cover.dataset.src = `/api/creative-assets/file?project=${encodeURIComponent(activeProjectId())}&p=${encodeURIComponent(item.path)}#t=0.001`;
+      cover.addEventListener('loadeddata', () => cover.classList.add('ready'), { once: true });
+      cover.addEventListener('error', () => cover.classList.remove('ready'));
+      thumb.appendChild(cover);
+      coverObserver.observe(cover);
+    }
     if (badge.text) {
       const badgeEl = document.createElement('span');
       badgeEl.className = 'tray-badge';
@@ -272,7 +318,11 @@ el.trayClearSelection.addEventListener('click', () => {
 if (window.trayAPI && typeof window.trayAPI.onDragResult === 'function') {
   window.trayAPI.onDragResult(result => {
     if (result && result.ok) showToast('已开始拖拽，松手放入剪映');
-    else if (result) showToast(result.error || '拖拽未完成');
+    else if (result) {
+      showToast(result.error || '拖拽未完成');
+      // 主进程认的当前项目与悬浮窗列表不一致（列表可能已过期）时，立即重载对齐，下一拖即可用
+      if (typeof result.error === 'string' && result.error.includes('不属于当前剧本')) loadAssets().catch(() => {});
+    }
   });
 }
 

@@ -1862,6 +1862,10 @@ const AgentApp = {
             (item.tags || []).map(t => h('span', { class: 'tag pink' }, t)),
           ),
           h('div', { class: 'k-card-actions' },
+            // 复制固定在卡片顶部：长模板不用滚到卡片底部再找按钮
+            sec.id === 'openers'
+              ? h('button', { class: 'btn small primary', onclick: () => copyText(item.body) }, '复制开场包')
+              : h('button', { class: 'btn small', onclick: () => copyText(item.body) }, '复制'),
             h('button', { class: 'btn small', onclick: () => this.editCard(root, win, sec, item) }, '编辑'),
             h('button', { class: 'btn small', style: 'color:var(--accent)', onclick: () => this.deleteCard(root, win, sec, item) }, '删除'),
           ),
@@ -1878,9 +1882,6 @@ const AgentApp = {
               } catch { toast('发送失败'); }
             },
           }, '→ 提示词区'),
-          sec.id === 'openers'
-            ? h('button', { class: 'btn primary', onclick: () => copyText(item.body) }, '复制开场包')
-            : h('button', { class: 'btn', onclick: () => copyText(item.body) }, '复制'),
         ),
       );
       rendered = true;
@@ -2297,12 +2298,30 @@ const CreatorApp = {
 
     root.replaceChildren(h('div', { class: 'creator-launcher' },
       h('header', { class: 'creator-launcher-head' },
+        h('video', {
+          class: 'creator-home-video',
+          src: 'assets/aigc/creator-home-atmosphere-v1.mp4',
+          poster: 'assets/aigc/creator-home-atmosphere-v1.png',
+          autoplay: '', muted: '', loop: '', playsinline: '', preload: 'metadata',
+          'aria-hidden': 'true', tabindex: '-1',
+        }),
         h('div', { class: 'creator-launcher-copy' },
           h('h2', {}, '让每一次生成，', h('br'), '都从清楚的创作意图开始'),
           h('p', {}, '先选择剧本工作区；图片与视频共享人物、场景、首尾帧和生成记录。'),
           h('span', { class: `creator-desktop-status ${isDesktop ? 'ready' : ''}` },
             isDesktop ? '桌面创作浏览器已就绪' : '浏览器预览模式',
           ),
+        ),
+        h('a', {
+          class: 'creator-github-link',
+          href: 'https://github.com/SJT-bright/video-production-os',
+          target: '_blank', rel: 'noopener noreferrer',
+          'aria-label': 'SJT-bright 的 GitHub 开源项目：视频制作 OS',
+          title: '在 GitHub 查看视频制作 OS',
+        },
+          h('img', { src: 'assets/ui/creator/github-mark.svg', alt: '', 'aria-hidden': 'true' }),
+          h('span', {}, h('small', {}, 'Made by'), h('strong', {}, 'SJT-bright')),
+          h('span', { class: 'creator-github-arrow', 'aria-hidden': 'true' }, '↗'),
         ),
       ),
       h('div', { class: 'creator-lanes' },
@@ -2320,6 +2339,11 @@ const CreatorApp = {
         }),
       ),
     ));
+    const backgroundVideo = root.querySelector('.creator-home-video');
+    if (backgroundVideo) {
+      backgroundVideo.muted = true;
+      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) backgroundVideo.pause();
+    }
   },
 };
 

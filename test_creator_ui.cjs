@@ -47,9 +47,9 @@ async function main() {
     contentType: 'application/json',
     body: JSON.stringify({
       available: true,
-      stats: { files: 3, image: 2, video: 1, sizeText: '8 MB' },
+      stats: { files: 8, image: 3, video: 2, sizeText: '8 MB' },
       tree: {
-        kind: 'folder', name: '校园心动', path: '校园心动', fileCount: 3,
+        kind: 'folder', name: '校园心动', path: '校园心动', fileCount: 8,
         children: [
           {
             kind: 'folder', name: '人物图片', path: '校园心动/人物图片', fileCount: 3,
@@ -60,6 +60,15 @@ async function main() {
             ],
           },
           { kind: 'folder', name: '场景图片', path: '校园心动/场景图片', fileCount: 0, children: [] },
+          { kind: 'folder', name: '浏览器下载', path: '校园心动/浏览器下载', fileCount: 5, children: [
+            { kind: 'folder', name: 'GPT', path: '校园心动/浏览器下载/GPT', fileCount: 5, children: [
+              { kind: 'file', type: 'other', name: '剪映安装包.dmg', path: '校园心动/浏览器下载/GPT/剪映安装包.dmg', mtime: '2026-08-29T00:00:00.000Z' },
+              { kind: 'file', type: 'document', name: '制作说明.pdf', path: '校园心动/浏览器下载/GPT/制作说明.pdf', mtime: '2026-08-28T00:00:00.000Z' },
+              { kind: 'file', type: 'video', name: '旧视频.mp4', path: '校园心动/浏览器下载/GPT/旧视频.mp4', mtime: '2026-08-27T00:00:00.000Z' },
+              { kind: 'file', type: 'image', name: '旧图片.png', path: '校园心动/浏览器下载/GPT/旧图片.png', mtime: '2026-08-26T00:00:00.000Z' },
+              { kind: 'file', type: 'audio', name: '旧音频.mp3', path: '校园心动/浏览器下载/GPT/旧音频.mp3', mtime: '2026-08-25T00:00:00.000Z' },
+            ] },
+          ] },
         ],
       },
     }),
@@ -194,7 +203,7 @@ async function main() {
     });
   });
   await page.addInitScript(() => {
-    const events = { browser: [], download: [], mode: [], asset: [], project: [] };
+    const events = { browser: [], download: [], mode: [], asset: [], project: [], notice: [], findShow: [], findResult: [], focusAddress: [] };
     let currentProject = { id: 'project-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', name: '校园心动', folder: '校园心动', kind: 'script', categories: [] };
     const services = [
       { id: 'gpt', label: 'GPT', imageLabel: 'GPT 图片', videoLabel: 'GPT 提示词', url: 'https://chatgpt.com/' },
@@ -243,8 +252,12 @@ async function main() {
           serviceId: tab.serviceId,
           label: serviceMap[tab.serviceId]?.label || '',
           customName: tab.customName || '',
+          url: tab.url || serviceMap[tab.serviceId]?.url || '',
           mode: tab.mode,
           active: !!current && tab.id === current.id,
+          pinned: !!tab.pinned,
+          audible: !!tab.audible,
+          muted: !!tab.muted,
         })),
         tabId: current?.id || null,
       };
@@ -293,6 +306,15 @@ async function main() {
       emitMode(mode) { events.mode.forEach(callback => callback(mode)); },
       emitAsset(payload) { events.asset.forEach(callback => callback(payload)); },
       emitProject(project) { currentProject = project; events.project.forEach(callback => callback(project)); },
+      emitNotice(text) { events.notice.forEach(callback => callback(text)); },
+      emitShowFindBar() { events.findShow.forEach(callback => callback()); },
+      emitFindResult(result) { events.findResult.forEach(callback => callback(result)); },
+      makeAudible(tabId) {
+        const tab = openTabs.find(candidate => candidate.id === tabId);
+        if (!tab) return;
+        tab.audible = true;
+        emitBrowserPayload(browserPayload(tab.serviceId));
+      },
     };
     window.creatorAPI = {
       getConfig: async () => {
@@ -410,6 +432,31 @@ async function main() {
         emitBrowserPayload(payload);
         return payload;
       },
+      reorderTabs: async payload => {
+        (window.__tabReorders = window.__tabReorders || []).push(payload);
+        if (payload.swapTabId && payload.withTabId) {
+          const a = openTabs.findIndex(tab => tab.id === payload.swapTabId);
+          const b = openTabs.findIndex(tab => tab.id === payload.withTabId);
+          if (a < 0 || b < 0) throw new Error('标签不存在');
+          [openTabs[a], openTabs[b]] = [openTabs[b], openTabs[a]];
+        } else if (payload.moveTabId) {
+          const from = openTabs.findIndex(tab => tab.id === payload.moveTabId);
+          if (from < 0) throw new Error('标签不存在');
+          const [moved] = openTabs.splice(from, 1);
+          if (payload.beforeTabId) {
+            const to = openTabs.findIndex(tab => tab.id === payload.beforeTabId);
+            if (to < 0) throw new Error('目标标签不存在');
+            openTabs.splice(to, 0, moved);
+          } else {
+            openTabs.push(moved);
+          }
+        } else {
+          throw new Error('缺少要移动的标签');
+        }
+        const reorderedPayload = browserPayload(activeTab()?.serviceId);
+        emitBrowserPayload(reorderedPayload);
+        return reorderedPayload;
+      },
       copyAsset: async assetPath => {
         (window.__assetCopied = window.__assetCopied || []).push(assetPath);
         return true;
@@ -418,12 +465,20 @@ async function main() {
         (window.__assetDeleted = window.__assetDeleted || []).push(assetPath);
         return true;
       },
+      deleteBrowserDownload: async assetPath => {
+        (window.__browserDownloadDeleted = window.__browserDownloadDeleted || []).push(assetPath);
+        return true;
+      },
       pageZoom: async action => { (window.__zoomCalls = window.__zoomCalls || []).push(action); return true; },
       setPlatformViewHidden: async hidden => { (window.__overlayHidden = window.__overlayHidden || []).push(!!hidden); return {}; },
       closeTab: async tabId => {
         (window.__tabClosed = window.__tabClosed || []).push(tabId);
         const index = openTabs.findIndex(candidate => candidate.id === tabId);
-        if (index >= 0) openTabs.splice(index, 1);
+        if (index >= 0) {
+          window.__closedTabStack = window.__closedTabStack || [];
+          window.__closedTabStack.push({ ...openTabs[index] });
+          openTabs.splice(index, 1);
+        }
         const next = activeTab();
         activate(next);
         const payload = next
@@ -431,6 +486,70 @@ async function main() {
           : { serviceId: '', loading: false, url: '', title: '', canGoBack: false, canGoForward: false, error: '', tabs: [], tabId: null };
         emitBrowserPayload(payload);
         return payload;
+      },
+      pinTab: async (tabId, pinned) => {
+        (window.__pinCalls = window.__pinCalls || []).push({ tabId, pinned });
+        const tab = openTabs.find(candidate => candidate.id === tabId);
+        if (!tab) throw new Error('标签不存在');
+        tab.pinned = !!pinned;
+        const pinnedList = openTabs.filter(candidate => candidate.pinned);
+        const unpinned = openTabs.filter(candidate => !candidate.pinned);
+        openTabs.length = 0;
+        openTabs.push(...pinnedList, ...unpinned);
+        const payload = browserPayload(activeTab()?.serviceId);
+        emitBrowserPayload(payload);
+        return payload;
+      },
+      setTabMuted: async (tabId, muted) => {
+        (window.__muteCalls = window.__muteCalls || []).push({ tabId, muted });
+        const tab = openTabs.find(candidate => candidate.id === tabId);
+        if (!tab) throw new Error('标签不存在');
+        tab.muted = !!muted;
+        const payload = browserPayload(activeTab()?.serviceId);
+        emitBrowserPayload(payload);
+        return payload;
+      },
+      restoreClosedTab: async () => {
+        const entry = (window.__closedTabStack || []).pop();
+        if (!entry) throw new Error('没有可恢复的标签');
+        (window.__tabRestores = window.__tabRestores || []).push({ serviceId: entry.serviceId, mode: entry.mode });
+        const tab = makeTab(entry.serviceId, entry.mode);
+        if (entry.customName) tab.customName = entry.customName;
+        activate(tab);
+        const payload = browserPayload(tab.serviceId);
+        emitBrowserPayload(payload);
+        return payload;
+      },
+      closeOtherTabs: async (tabId, scope) => {
+        (window.__closeOthersCalls = window.__closeOthersCalls || []).push({ tabId, scope });
+        const target = openTabs.find(candidate => candidate.id === tabId);
+        if (!target) throw new Error('标签不存在');
+        const ids = openTabs.filter(candidate => candidate.mode === target.mode).map(candidate => candidate.id);
+        const targets = scope === 'right' ? ids.slice(ids.indexOf(tabId) + 1)
+          : scope === 'left' ? ids.slice(0, ids.indexOf(tabId)) : ids.filter(id => id !== tabId);
+        let closed = 0;
+        for (const id of targets) {
+          const index = openTabs.findIndex(candidate => candidate.id === id);
+          if (index >= 0) {
+            window.__closedTabStack = window.__closedTabStack || [];
+            window.__closedTabStack.push({ ...openTabs[index] });
+            openTabs.splice(index, 1);
+            closed++;
+          }
+        }
+        const next = activeTab() || target;
+        activate(next);
+        const payload = browserPayload(next.serviceId, { closed });
+        emitBrowserPayload(payload);
+        return payload;
+      },
+      findInPage: async (text, forward, findNext) => {
+        (window.__findCalls = window.__findCalls || []).push({ text, forward, findNext });
+        return true;
+      },
+      stopFindInPage: async keepSelection => {
+        (window.__stopFindCalls = window.__stopFindCalls || []).push(keepSelection);
+        return true;
       },
       setBrowserBounds: async bounds => { window.__creatorTest.bounds.push(bounds); return bounds; },
       navigate: async action => { navActions.push(action); return true; },
@@ -469,6 +588,10 @@ async function main() {
       onSetMode: callback => { events.mode.push(callback); return () => {}; },
       onProjectChanged: callback => { events.project.push(callback); return () => {}; },
       onAssetPanelState: callback => { events.asset.push(callback); return () => {}; },
+      onNotice: callback => { events.notice.push(callback); return () => {}; },
+      onShowFindBar: callback => { events.findShow.push(callback); return () => {}; },
+      onFindResult: callback => { events.findResult.push(callback); return () => {}; },
+      onFocusAddress: callback => { events.focusAddress.push(callback); return () => {}; },
     };
   });
 
@@ -488,6 +611,7 @@ async function main() {
   assert.equal(await page.locator('#currentShotContext, #shotDialog, #queueImportBreakdown, #queueAccordion, #queueAddCurrent').count(), 0, '已移除镜头台账、拆解导入和提示词队列');
   // 顶部条只显示已打开的网页标签；启动后只有默认平台一个标签
   assert.deepEqual(await page.locator('.platform-tab').allTextContents(), ['Updream']);
+  assert.equal(await page.locator('.platform-tab-dup, .platform-tab-close').count(), 0, '标签上不应常驻复制或关闭按钮');
   await page.locator('#addPlatform').click();
   assert.equal(await page.locator('[data-remove-service]').count(), 7, '＋菜单应列出全部网站并提供移除入口');
   // 从＋菜单打开 Grok：新增一个网页标签，并显示内嵌验证兼容提示
@@ -499,6 +623,8 @@ async function main() {
   await page.locator('#duplicateTab').click();
   assert.deepEqual(await page.locator('.platform-tab').allTextContents(), ['Updream', 'Grok', 'Grok·2'], '多开没有生成带序号的第二个标签');
   await page.locator('.platform-tab', { hasText: 'Grok·2' }).click({ button: 'right' });
+  assert.equal(await page.locator('#tabContextMenu .tab-context-item', { hasText: '关闭左侧标签' }).isEnabled(), true, '末尾标签应可关闭左侧标签');
+  await page.locator('#tabContextMenu:not([hidden]) .tab-context-item', { hasText: '改名…' }).click();
   await page.locator('#renameName').fill('人物图');
   await page.locator('#renameName').press('Enter');
   await page.waitForFunction(() => !document.querySelector('#renameDialog').open);
@@ -514,19 +640,99 @@ async function main() {
   await page.locator('#renameSave').click();
   await page.waitForFunction(() => !document.querySelector('#renameDialog').open);
   await page.locator('#cancelPlatform').click();
-  await page.locator('.platform-tab-wrap', { hasText: '人物图' }).locator('.platform-tab-close').click();
+  await page.locator('.platform-tab-wrap', { hasText: '人物图' }).click({ button: 'right' });
+  await page.locator('#tabContextMenu:not([hidden]) .tab-context-item', { hasText: '关闭标签' }).click();
   await page.waitForFunction(() => document.querySelectorAll('.platform-tab').length === 2);
   assert.deepEqual(await page.locator('.platform-tab').allTextContents(), ['Updream', 'Grok'], '关闭多开标签失败');
-  // 复制标签：悬停 ⧉ 一键在旁边多开同一个平台
+  // 复制标签：右键菜单在旁边多开同一个平台，不再占用标签宽度
   const grokTabId = await page.locator('.platform-tab', { hasText: 'Grok' }).getAttribute('data-tab-id');
-  await page.locator('.platform-tab-wrap', { hasText: 'Grok' }).hover();
-  await page.locator('.platform-tab-wrap', { hasText: 'Grok' }).locator('.platform-tab-dup').click();
+  await page.locator('.platform-tab-wrap', { hasText: 'Grok' }).click({ button: 'right' });
+  await page.locator('#tabContextMenu:not([hidden]) .tab-context-item', { hasText: '再开一个标签' }).click();
   await page.locator('.platform-tab', { hasText: 'Grok·2' }).waitFor({ state: 'visible' });
   assert.deepEqual(await page.locator('.platform-tab').allTextContents(), ['Updream', 'Grok', 'Grok·2'], '复制标签应插到源标签旁边');
   const dupRecord = await page.evaluate(() => (window.__tabDups || []).at(-1));
   assert.equal(dupRecord.afterTabId, grokTabId, '复制标签没有插到源标签之后');
   assert.equal(dupRecord.serviceId, 'grok', '复制标签的平台不正确');
-  await page.locator('.platform-tab-wrap', { hasText: 'Grok·2' }).locator('.platform-tab-close').click();
+  // 拖拽换位（指针方案）：用真实鼠标路径模拟——按下、分步移动、松手，
+  // 与真实用户操作一致；拖到中央＝互换，拖到左缘＝插到它前面
+  const domTabIds = () => page.locator('#platformTabs .platform-tab').evaluateAll(nodes => nodes.map(node => node.dataset.tabId));
+  const waitTabIds = async expected => {
+    await page.waitForFunction(
+      expectation => JSON.stringify([...document.querySelectorAll('#platformTabs .platform-tab')].map(node => node.dataset.tabId)) === JSON.stringify(expectation),
+      expected, { timeout: 5000 });
+  };
+  const mouseDragTab = async (sourceId, targetId, targetOffsetX = null) => {
+    const sourceBox = await page.locator(`.platform-tab-wrap[data-tab-id="${sourceId}"]`).boundingBox();
+    const targetBox = await page.locator(`.platform-tab-wrap[data-tab-id="${targetId}"]`).boundingBox();
+    await page.mouse.move(sourceBox.x + sourceBox.width / 2, sourceBox.y + sourceBox.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(
+      targetBox.x + (targetOffsetX ?? targetBox.width / 2),
+      targetBox.y + targetBox.height / 2,
+      { steps: 10 },
+    );
+    assert.equal(await page.locator('.tab-drag-ghost').count(), 1, '拖动中应有跟随光标的光泽拖影');
+    await page.mouse.up();
+  };
+  const [updreamTabId, grokTabIdBeforeDrag, grokDupTabId] = await domTabIds();
+  // 起始顺序 [Updream(tab-1), Grok(tab-2), Grok·2(tab-4)]：
+  // ① 把 Grok·2 拖到 Updream 中央＝tab-4 与 tab-1 互换（中间的 tab-2 原地不动）；
+  // ② 把 Updream 拖到（此时排最前的）Grok·2 左缘＝插到它前面。
+  await mouseDragTab(grokDupTabId, updreamTabId);
+  await waitTabIds([grokDupTabId, grokTabIdBeforeDrag, updreamTabId]);
+  assert.deepEqual(await domTabIds(), [grokDupTabId, grokTabIdBeforeDrag, updreamTabId], '拖到标签中央应互换两个标签的位置');
+  await mouseDragTab(updreamTabId, grokDupTabId, 6);
+  await waitTabIds([updreamTabId, grokDupTabId, grokTabIdBeforeDrag]);
+  assert.deepEqual(await domTabIds(), [updreamTabId, grokDupTabId, grokTabIdBeforeDrag], '拖到标签左缘应插到该标签之前');
+  assert.deepEqual(await page.evaluate(() => window.__tabReorders), [
+    { swapTabId: grokDupTabId, withTabId: updreamTabId },
+    { moveTabId: updreamTabId, beforeTabId: grokDupTabId },
+  ], '拖拽换位应按 drop 区域提交 swap 或 move 计划');
+  // 拖拽收尾：光泽拖影、压暗态和源标签拖动态都应清干净
+  assert.equal(await page.evaluate(() => document.querySelectorAll('.tab-drag-ghost').length), 0, '拖拽结束后应移除光泽拖影');
+  assert.equal(await page.locator('#platformTabs .platform-tab-wrap.dragging').count(), 0, '拖拽结束后应清除源标签拖动态');
+  assert.equal(await page.locator('#platformTabs.tab-drag-active').count(), 0, '拖拽结束后标签栏应退出压暗态');
+  // 未超过移动阈值＝普通点击：原地按下松开应只切换标签，不改变顺序。
+  // 按下点以 elementFromPoint 实测命中为准：标签条可能有滚动或翻转动画，先查的包围盒会过期。
+  const beforeClickOrder = await domTabIds();
+  const clickBox = await page.locator(`.platform-tab-wrap[data-tab-id="${grokTabIdBeforeDrag}"] .platform-tab`).boundingBox();
+  const clickPoint = { x: clickBox.x + clickBox.width / 2, y: clickBox.y + clickBox.height / 2 };
+  await page.mouse.move(clickPoint.x, clickPoint.y);
+  const clickHitId = await page.evaluate(([x, y]) => {
+    const hit = document.elementFromPoint(x, y)?.closest('.platform-tab[data-tab-id]');
+    if (!hit) throw new Error(`标签按下点 (${x}, ${y}) 没有命中任何标签`);
+    return hit.dataset.tabId;
+  }, [clickPoint.x, clickPoint.y]);
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.waitForFunction(id => document.querySelector('.platform-tab.active')?.dataset.tabId === id, clickHitId, { timeout: 5000 });
+  assert.deepEqual(await domTabIds(), beforeClickOrder, '原地按下松开不应触发重排');
+  // 竞态回归：标签栏重渲染恰好落在按下与抬起之间时，按下节点被替换、click 事件整个丢失；
+  // 激活必须在 pointerup 直接触发 selectTab，否则表现为点了标签却没切换。
+  const raceBox = await page.locator(`.platform-tab-wrap[data-tab-id="${updreamTabId}"] .platform-tab`).boundingBox();
+  const racePoint = { x: raceBox.x + raceBox.width / 2, y: raceBox.y + raceBox.height / 2 };
+  await page.mouse.move(racePoint.x, racePoint.y);
+  const raceHitId = await page.evaluate(([x, y]) => {
+    const hit = document.elementFromPoint(x, y)?.closest('.platform-tab[data-tab-id]');
+    if (!hit) throw new Error(`标签按下点 (${x}, ${y}) 没有命中任何标签`);
+    return hit.dataset.tabId;
+  }, [racePoint.x, racePoint.y]);
+  await page.mouse.down();
+  await page.evaluate(() => renderPlatforms());
+  await page.mouse.up();
+  await page.waitForFunction(id => document.querySelector('.platform-tab.active')?.dataset.tabId === id, raceHitId, { timeout: 5000 });
+  assert.deepEqual(await domTabIds(), beforeClickOrder, '重渲染竞态下的按下松开也不应触发重排');
+  // Esc 取消拖动：激活拖拽后按 Esc，顺序不变、拖影移除
+  const escBox = await page.locator(`.platform-tab-wrap[data-tab-id="${grokTabIdBeforeDrag}"] .platform-tab`).boundingBox();
+  await page.mouse.move(escBox.x + escBox.width / 2, escBox.y + escBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(escBox.x + 40, escBox.y + 20, { steps: 4 });
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+  assert.deepEqual(await domTabIds(), beforeClickOrder, 'Esc 应取消拖动且顺序不变');
+  assert.equal(await page.evaluate(() => document.querySelectorAll('.tab-drag-ghost').length), 0, 'Esc 取消后应移除拖影');
+  await page.locator('.platform-tab-wrap', { hasText: 'Grok·2' }).click({ button: 'right' });
+  await page.locator('#tabContextMenu:not([hidden]) .tab-context-item', { hasText: '关闭标签' }).click();
   await page.waitForFunction(() => document.querySelectorAll('.platform-tab').length === 2);
   page.once('dialog', dialog => dialog.accept());
   await page.locator('#addPlatform').click();
@@ -540,10 +746,92 @@ async function main() {
   assert.deepEqual((await page.evaluate(() => window.__creatorTest.platformCalls)).map(call => call.action), ['hide', 'restore']);
   await page.locator('#cancelPlatform').click();
 
+  // —— 浏览器级标签能力（对标 Chrome）：中键关闭、撤销关闭、固定、静音、关闭其他、页内查找、Alt+Enter ——
+  await page.locator('#addPlatform').click();
+  await page.locator('[data-open-service="grok"]').click();
+  await page.locator('.platform-tab', { hasText: 'Grok' }).waitFor({ state: 'visible' });
+  // 中键关闭 Grok，再用 Ctrl/⌘+Shift+T 撤销关闭
+  await page.locator('.platform-tab-wrap', { hasText: 'Grok' }).click({ button: 'middle' });
+  await page.waitForFunction(() => document.querySelectorAll('.platform-tab').length === 1);
+  await page.keyboard.press('ControlOrMeta+Shift+T');
+  await page.locator('.platform-tab', { hasText: 'Grok' }).waitFor({ state: 'visible' });
+  assert.equal(await page.evaluate(() => (window.__tabRestores || []).length), 1, '撤销关闭应调用恢复接口');
+  // 右键菜单：固定 Grok → 收缩为单字钉位且排最前；再取消固定还原
+  const grokTabIdForPin = await page.locator('.platform-tab', { hasText: 'Grok' }).getAttribute('data-tab-id');
+  await page.locator(`.platform-tab-wrap[data-tab-id="${grokTabIdForPin}"]`).click({ button: 'right' });
+  await page.locator('#tabContextMenu:not([hidden]) .tab-context-item', { hasText: '固定标签' }).click();
+  await page.waitForFunction(() => !!document.querySelector('.platform-tab-wrap.pinned'));
+  assert.equal(await page.locator('.platform-tab-wrap').first().getAttribute('data-tab-id'), grokTabIdForPin, '固定标签应排到最前');
+  assert.equal(await page.locator('.platform-tab-wrap.pinned .platform-tab').textContent(), 'G', '固定标签应收缩为单字钉位');
+  await page.locator('.platform-tab-wrap.pinned .platform-tab').click({ button: 'right' });
+  await page.locator('#tabContextMenu:not([hidden]) .tab-context-item', { hasText: '取消固定' }).click();
+  await page.waitForFunction(() => !document.querySelector('.platform-tab-wrap.pinned'));
+  // Esc 只关菜单不动标签
+  await page.locator(`.platform-tab-wrap[data-tab-id="${grokTabIdForPin}"]`).click({ button: 'right' });
+  await page.locator('#tabContextMenu:not([hidden])').waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#tabContextMenu .tab-context-item', { hasText: '关闭左侧标签' }).isEnabled(), false, '最左侧标签不应允许关闭左侧');
+  await page.locator('#tabContextMenu .tab-context-item', { hasText: '复制网页地址' }).click();
+  assert.equal(await page.evaluate(() => window.__creatorTest.clipboardText), 'https://grok.com/', '应复制当前标签的网址');
+  await page.locator(`.platform-tab-wrap[data-tab-id="${grokTabIdForPin}"]`).click({ button: 'right' });
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(() => document.querySelector('#tabContextMenu')?.hidden === true);
+  assert.equal(await page.locator('.platform-tab').count(), 2, 'Esc 关闭菜单不应影响标签');
+  // 声音角标：出声 🔊 → 点击静音 🔇 → 再点恢复
+  const grokTabIdNow = await page.locator('.platform-tab', { hasText: 'Grok' }).getAttribute('data-tab-id');
+  await page.evaluate(tabId => window.__creatorTest.makeAudible(tabId), grokTabIdNow);
+  await page.locator('.platform-tab-audio').waitFor({ state: 'visible' });
+  await page.locator('.platform-tab-audio').click();
+  await page.waitForFunction(() => document.querySelector('.platform-tab-audio')?.classList.contains('muted'));
+  assert.deepEqual(await page.evaluate(() => window.__muteCalls), [{ tabId: grokTabIdNow, muted: true }], '点击角标应静音该网页');
+  await page.locator('.platform-tab-audio').click();
+  await page.waitForFunction(() => !!document.querySelector('.platform-tab-audio') && !document.querySelector('.platform-tab-audio').classList.contains('muted'));
+  // 关闭其他标签：只剩 Grok，可再撤销
+  await page.locator('.platform-tab-wrap', { hasText: 'Grok' }).click({ button: 'right' });
+  await page.locator('#tabContextMenu:not([hidden]) .tab-context-item', { hasText: '关闭其他标签' }).click();
+  await page.waitForFunction(() => document.querySelectorAll('.platform-tab').length === 1);
+  assert.deepEqual(await page.evaluate(() => window.__closeOthersCalls), [{ tabId: grokTabIdNow, scope: 'others' }], '关闭其他应带锚点与范围');
+  await page.keyboard.press('ControlOrMeta+Shift+T');
+  await page.locator('.platform-tab', { hasText: 'Updream' }).waitFor({ state: 'visible' });
+  // 地址栏 Alt+Enter：新标签打开且原网页不动
+  const tabsBeforeAlt = await page.locator('.platform-tab').count();
+  await page.locator('#addressInput').fill('example.com/test');
+  await page.locator('#addressInput').press('Alt+Enter');
+  await page.waitForFunction(count => document.querySelectorAll('.platform-tab').length === count + 1, tabsBeforeAlt, { timeout: 5000 });
+  assert.deepEqual((await page.evaluate(() => window.__tabDups)).at(-1)?.serviceId, 'updream', 'Alt+Enter 应复制当前平台开新标签');
+  assert.ok(
+    (await page.evaluate(() => window.__creatorTest.addressCalls)).includes('example.com/test'),
+    'Alt+Enter 应把输入地址导航到新标签',
+  );
+  // 页内查找：主进程转发打开查找条 → 回车查找 → 计数回显 → Esc 关闭并停止
+  await page.evaluate(() => window.__creatorTest.emitShowFindBar());
+  await page.locator('#findBar:not([hidden])').waitFor({ state: 'visible' });
+  await page.locator('#findInput').fill('提示词');
+  await page.locator('#findInput').press('Enter');
+  assert.ok((await page.evaluate(() => window.__findCalls || [])).length >= 1, '回车应触发页内查找');
+  await page.evaluate(() => window.__creatorTest.emitFindResult({ activeMatchOrdinal: 2, matches: 5 }));
+  await page.waitForFunction(() => document.querySelector('#findCount')?.textContent === '2/5');
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(() => document.querySelector('#findBar')?.hidden === true);
+  assert.ok((await page.evaluate(() => window.__stopFindCalls || [])).length >= 1, '关闭查找条应停止页内查找并清除高亮');
+  // 收尾：关掉本组用例多开的标签、清掉地址记录，恢复“只剩一个 Updream”的初始状态
+  await page.evaluate(() => {
+    const calls = window.__creatorTest.addressCalls;
+    const index = calls.indexOf('example.com/test');
+    if (index !== -1) calls.splice(index, 1);
+  });
+  await page.locator('.platform-tab-wrap', { hasText: 'Grok' }).click({ button: 'right' });
+  await page.locator('#tabContextMenu:not([hidden]) .tab-context-item', { hasText: '关闭标签' }).click();
+  await page.waitForFunction(() => document.querySelectorAll('.platform-tab').length === 2);
+  await page.locator('.platform-tab-wrap', { hasText: 'Updream·2' }).click({ button: 'right' });
+  await page.locator('#tabContextMenu:not([hidden]) .tab-context-item', { hasText: '关闭标签' }).click();
+  await page.waitForFunction(() => document.querySelectorAll('.platform-tab').length === 1);
+  assert.deepEqual(await page.locator('.platform-tab').allTextContents(), ['Updream'], '浏览器标签用例应恢复初始标签状态');
+
   assert.equal(await page.locator('#promptAccordion').getAttribute('open'), null, '没有模板和草稿时提示词板块应默认折叠');
   assert.equal(await page.locator('#assetAccordion').getAttribute('open'), '', '资产图片板块应默认展开');
-  assert.equal(await page.locator('.asset-image-card').count(), 3, '创作资产板块没有同时显示图片与视频');
-  assert.equal(await page.locator('.asset-video-preview').count(), 1, '本地视频没有显示为视频资产');
+  const characterCards = page.locator('.quick-folder-row:has-text("人物图片") + .quick-children');
+  assert.equal(await characterCards.locator('.asset-image-card').count(), 3, '创作资产板块没有同时显示图片与视频');
+  assert.equal(await characterCards.locator('.asset-video-preview').count(), 1, '本地视频没有显示为视频资产');
   // 快捷分类树：展开「人物图片」后图片嵌在树下，导入目标同步为该分类
   await page.locator('.quick-folder-name', { hasText: '人物图片' }).click();
   await page.waitForFunction(() => document.querySelectorAll('.quick-children:not(.collapsed)').length >= 2, null, { timeout: 5000 });
@@ -553,7 +841,7 @@ async function main() {
   await page.locator('#quickMultiSelect').click();
   assert.equal(await page.locator('#quickMultiSelect').getAttribute('aria-pressed'), 'true', '框选模式应开启');
   assert.equal(await page.locator('#quickSelInfo').textContent(), '点卡片选入，或按住拖动画框', '开启后应有选入引导');
-  const visibleImageCards = page.locator('#quickFolderTree .asset-image-card.image:visible');
+  const visibleImageCards = page.locator('.quick-folder-row:has-text("人物图片") + .quick-children .asset-image-card.image:visible');
   const cardCount = await visibleImageCards.count();
   assert.ok(cardCount >= 2, `框选断言前置：可见图片卡应 ≥2，实际 ${cardCount}`);
   await visibleImageCards.nth(0).click();
@@ -566,7 +854,7 @@ async function main() {
   assert.equal((await page.evaluate(() => window.__creatorTest.selectionDrags))[0].length, 2, '整批拖出应携带全部选中资产');
   // 删除已选资产：框选序列自动剔除该项（删除流程调用 updateQuickSelectionUI，已选计数递减）
   page.once('dialog', dialog => dialog.accept());
-  await page.locator('#quickFolderTree .asset-image-card.image').first().hover();
+  await characterCards.locator('.asset-image-card.image').first().hover();
   await page.locator('.asset-quick-delete').first().click();
   await page.waitForFunction(() => (window.__assetDeleted || []).length === 1, null, { timeout: 5000 });
   await page.waitForFunction(() => (document.getElementById('quickSelInfo')?.textContent || '').includes('已选 1 项'), null, { timeout: 5000 });
@@ -589,7 +877,7 @@ async function main() {
     covers: document.querySelectorAll('.asset-video-cover').length,
   }));
   console.log('COVER-STATE', JSON.stringify(coverState));
-  await page.locator('.asset-image-card.image').first().click();
+  await characterCards.locator('.asset-image-card.image').first().click();
   await page.locator('#quickPreviewDialog[open]').waitFor({ state: 'attached' });
   assert.equal(await page.locator('#quickPreviewStage img').count(), 1, '图片预览应在内置对话框放大显示');
   await page.locator('#quickPreviewInLibrary').click();
@@ -790,7 +1078,7 @@ async function main() {
   assert.equal(await page.locator('[data-copy-asset]').count(), 2, '图片资产卡应提供复制按钮');
   await page.locator('[data-copy-asset]').first().click();
   assert.deepEqual(await page.evaluate(() => window.__assetCopied), ['校园心动/人物图片/女主正脸.png'], '复制按钮没有调用复制图片');
-  assert.equal(await page.locator('[data-delete-asset]').count(), 3, '全部资产卡都应提供删除按钮');
+  assert.equal(await page.locator('#quickFolderTree [data-delete-asset]').count(), 3, '全部资产卡都应提供删除按钮');
   page.once('dialog', dialog => dialog.accept());
   await page.locator('[data-delete-asset]').first().click();
   await page.waitForFunction(() => (window.__assetDeleted || []).length === 2);
@@ -821,7 +1109,7 @@ async function main() {
   });
   assert.deepEqual(await page.evaluate(() => window.__nativeDragPaths), [firstCardPath], '左侧图片没有调用原生文件拖拽');
   assert.equal(await page.locator('.asset-image-card img').first().getAttribute('draggable'), 'false', '不能拖出缩略图网址');
-  await page.locator('.asset-card-wrap:has(.asset-video-preview)').evaluate(card => {
+  await page.locator('#quickFolderTree .asset-card-wrap:has(.asset-image-card.video)').evaluate(card => {
     card.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: new DataTransfer() }));
   });
   assert.match((await page.evaluate(() => window.__nativeDragPaths)).at(-1), /镜头测试\.mp4$/, '左侧视频也应拖出原文件');
@@ -940,6 +1228,36 @@ async function main() {
   const importedCard = page.locator('.download-item', { hasText: '外部生成.mp4' });
   assert.equal(await importedCard.locator('.download-actions').count(), 0, '本机导入任务不应显示无效暂停/取消按钮');
   assert.ok((await importedCard.textContent()).includes('正在导入'));
+  await page.evaluate(() => window.__creatorTest.emitDownload({
+    id: 'file-1', serviceId: 'gpt', serviceLabel: 'GPT', mode: 'video', kind: 'file',
+    filename: '剪映安装包.dmg', savePath: 'D:\\mock\\创作资产库\\校园心动\\浏览器下载\\GPT\\剪映安装包.dmg', state: 'completed',
+    receivedBytes: 1000, totalBytes: 1000, startedAt: new Date().toISOString(),
+  }));
+  const downloadGrid = page.locator('#browserDownloadDock .browser-download-grid');
+  assert.equal(await page.evaluate(() => {
+    const tree = document.getElementById('quickFolderTree');
+    const dock = document.getElementById('browserDownloadDock');
+    return !!(tree && dock && (tree.compareDocumentPosition(dock) & Node.DOCUMENT_POSITION_FOLLOWING));
+  }), true, '浏览器下载应固定在分类列表最下面');
+  assert.equal(await downloadGrid.locator('.asset-card-label', { hasText: '剪映安装包.dmg' }).count(), 1, '安装包应出现在左下角下载卡片');
+  await downloadGrid.locator('.asset-card-wrap', { hasText: '剪映安装包.dmg' }).dispatchEvent('dragstart');
+  assert.match(await page.evaluate(() => (window.__nativeDragPaths || []).at(-1)), /剪映安装包\.dmg$/, '已下载的安装包应能拖出');
+  assert.equal(await downloadGrid.locator('.asset-card-label', { hasText: '制作说明.pdf' }).count(), 1, '文档应保留在下载区');
+  assert.equal(await page.locator('#browserDownloadCount').textContent(), '2', '下载计数只统计文件，不统计图片、视频和音频');
+  assert.equal(await page.locator('#browserDownloadNav .browser-download-folder', { hasText: 'GPT' }).count(), 1, '浏览器下载应保留可进入的文件夹');
+  await page.locator('#browserDownloadNav .browser-download-folder', { hasText: 'GPT' }).click();
+  assert.equal(await page.locator('#browserDownloadNav .browser-download-folder', { hasText: '全部文件' }).count(), 1, '进入文件夹后应能返回');
+  assert.equal(await downloadGrid.locator('.asset-card-label', { hasText: '角色母图.png' }).count(), 0, '图片不得进入文件下载区');
+  assert.equal(await downloadGrid.locator('.asset-card-label', { hasText: '镜头01.mp4' }).count(), 0, '视频不得进入文件下载区');
+  assert.equal(await downloadGrid.locator('.asset-card-label', { hasText: '旧视频.mp4' }).count(), 0, '即使旧视频落在下载目录，也不应显示');
+  assert.equal(await downloadGrid.locator('.asset-card-label', { hasText: '旧图片.png' }).count(), 0, '即使旧图片落在下载目录，也不应显示');
+  assert.equal(await downloadGrid.locator('.asset-card-label', { hasText: '外部生成.mp4' }).count(), 0, '本机导入不是浏览器下载');
+  const permanentDelete = downloadGrid.locator('.asset-card-wrap', { hasText: '剪映安装包.dmg' }).locator('.asset-quick-delete');
+  assert.match(await permanentDelete.getAttribute('title'), /永久删除/, '浏览器下载不能复用移入废纸篓的操作');
+  page.once('dialog', dialog => dialog.accept());
+  await permanentDelete.click();
+  await page.waitForFunction(() => (window.__browserDownloadDeleted || []).length === 1);
+  assert.match((await page.evaluate(() => window.__browserDownloadDeleted))[0], /剪映安装包\.dmg$/);
 
   await page.locator('#togglePrompt').click();
   assert.equal(await page.locator('body').evaluate(body => body.classList.contains('prompt-collapsed')), true);

@@ -14,6 +14,7 @@ const INSPIRATION_PROJECT_ID = 'inspiration';
 const INSPIRATION_PROJECT_NAME = '灵感生成';
 const PROJECT_ID_PATTERN = /^(?:inspiration|project-[a-f0-9]{12}|project-[0-9a-f-]{20,})$/;
 const PROJECT_CATEGORIES = Object.freeze([
+  Object.freeze({ id: 'browser-downloads', label: '浏览器下载', aliases: Object.freeze(['浏览器下载']) }),
   Object.freeze({ id: 'characters', label: '人物资产', aliases: Object.freeze(['人物资产', '人物']) }),
   Object.freeze({ id: 'scenes', label: '场景资产', aliases: Object.freeze(['场景资产', '场景']) }),
   Object.freeze({ id: 'wardrobe-props', label: '服装与道具', aliases: Object.freeze(['服装与道具', '服装道具', '服装', '道具']) }),

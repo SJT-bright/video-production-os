@@ -27,7 +27,13 @@
     dialog.setAttribute('aria-labelledby', 'assetSourcesTitle');
     const title = node('h2', '', '外部来源'); title.id = 'assetSourcesTitle';
     const header = node('header', 'as-header');
-    const close = button('×', () => dialog.close(), 'as-close'); close.setAttribute('aria-label', '关闭外部来源');
+    const close = node('button', 'as-close', '×');
+    close.type = 'button';
+    close.setAttribute('aria-label', '关闭外部来源');
+    // 双保险：onclick 之外再挂 addEventListener，任一机制失效（如被其他脚本清掉 onclick）也能关闭
+    const requestClose = () => { if (dialog.open) dialog.close(); };
+    close.onclick = requestClose;
+    close.addEventListener('click', requestClose);
     header.append(title, close);
     const controls = node('div', 'as-controls');
     const label = node('label', '', '用于剧本'); projects = node('select'); projects.setAttribute('aria-label', '素材目标剧本');
@@ -84,6 +90,8 @@
     dialog.append(header, controls, tabs, query, folderBar, sourceForm, list, status,
       node('p', 'as-note', '原文件保留在来源目录；“用于本剧”会复制到所选剧本，可继续拖入创作网页。'));
     dialog.addEventListener('close', () => { revision++; unsubscribe?.close(); unsubscribe = null; list.replaceChildren(); });
+    // 点击遮罩（dialog 本体区域）也可关闭：原生 dialog 点遮罩默认不关，创作者常会点外面试图退出
+    dialog.addEventListener('click', event => { if (event.target === dialog && dialog.open) dialog.close(); });
     document.body.append(dialog);
   }
   function fileType(name) {

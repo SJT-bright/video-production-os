@@ -36,9 +36,14 @@ const state = {
   quickCollapseInit: false,
   quickSelectMode: false,
   quickSelectionOrder: [],
+  // 已浮出为置顶小窗的视频资产（key=卡片相对路径，value=浮窗侧返回的路径）。
+  // 仅存在于本次会话内存：切换剧本清空、刷新自动复位，绝不持久化，避免留下与真实浮窗不符的假状态。
+  floatedVideoPaths: new Map(),
   skipClearConfirm: false,
   activeService: null,
   assetItems: [],
+  browserDownloadLimit: 60,
+  browserDownloadFolderFilter: '',
   downloads: new Map(),
   archiveNotified: new Set(),
   production: { available: false, context: null, inbox: [], stats: {} },
@@ -50,6 +55,8 @@ const state = {
 const el = Object.fromEntries([
   'platformTabs', 'addPlatform', 'clearBrowserTabs', 'platformPopover', 'platformForm', 'platformName', 'platformUrl', 'cancelPlatform',
   'platformOpenList', 'duplicateTab', 'duplicateTabLabel',
+  'allTabsButton', 'allTabsPopover', 'allTabsSearch', 'allTabsList',
+  'tabContextMenu', 'findBar', 'findInput', 'findCount', 'findPrev', 'findNext', 'findClose',
   'renameDialog', 'renameForm', 'renameTitle', 'renameName', 'renameError', 'renameCancel', 'renameSave',
   'hiddenPlatforms', 'hiddenPlatformList', 'restoreAllPlatforms',
   'draftStatus',
@@ -177,12 +184,15 @@ function resetProjectWorkspace() {
   state.history = { image: [], video: [] };
   // 固定提示词是全局资产，切换剧本时不清空。
   state.assetItems = [];
+  state.browserDownloadFolderFilter = '';
   // 剧本面板按剧本项目存储：切换后由 loadWorkspace 读入新剧本的分组。
   state.scripts = { groups: [] };
   expandedScriptGroups.clear(); expandedScriptItems.clear();
   state.accordions.prompt = false;
   // 框选导入序列属于旧剧本：整体清空，防止把旧项目资产拖进新项目上下文。
   state.quickSelectionOrder.length = 0;
+  // 浮出角标同样按剧本隔离：切换后旧路径不再匹配新剧本卡片，直接清空防止假状态。
+  state.floatedVideoPaths.clear();
 }
 
 function saveWorkspace(immediate = false) {
@@ -470,62 +480,496 @@ function scrollActiveTabIntoView() {
   if (active) active.scrollIntoView({ inline: 'nearest', block: 'nearest' });
 }
 
-function renderPlatforms() {  const scrollLeft = el.platformTabs.scrollLeft;
+// —— 标签拖拽换位（指针方案，对标 Chrome 自己的标签拖拽实现）——
+// 不依赖 HTML5 DnD：Electron 打包环境下 dataTransfer/拖影行为不可控且版本敏感，
+// pointer 事件完全由自己掌握。按住标签移动超过阈值进入拖动，光泽拖影实时跟随光标；
+// 落到另一标签左右 1/3 显示插入线（松手插到该侧），中间 1/3 高亮互换；标签条空白处＝
+// 移到末尾；Esc 取消；靠近标签条左右边缘自动横滚。未超过阈值＝普通点击，与点击选择、
+// 双击/右键/F2 改名互不干扰。
+const TAB_DRAG_THRESHOLD = 5;
+let tabDrag = null; // { pointerId, sourceId, label, startX, startY, active, ghost, lastX, lastY, scrollFrame }
+let tabDropPlan = null; // { targetId, zone: 'before' | 'after' | 'swap' }
+let tabClickSuppressed = false;
+const tabPopIds = new Set(); // 松手后要做 Q 弹落定动画的标签
+
+const reducedMotion = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+
+function setTabStripDragging(on) {
+  el.platformTabs.classList.toggle('tab-drag-active', on);
+  document.body.classList.toggle('tab-dragging-cursor', on);
+}
+
+function removeTabDragGhost() {
+  tabDrag?.ghost?.remove();
+  if (tabDrag) tabDrag.ghost = null;
+}
+
+function clearTabDropFeedback() {
+  for (const wrap of el.platformTabs.querySelectorAll('.platform-tab-wrap')) {
+    wrap.classList.remove('drop-before', 'drop-after', 'drop-swap');
+  }
+}
+
+function planTabDrop(wrapper, tabId, clientX) {
+  const rect = wrapper.getBoundingClientRect();
+  const ratio = (clientX - rect.left) / Math.max(rect.width, 1);
+  const zone = ratio < 1 / 3 ? 'before' : ratio > 2 / 3 ? 'after' : 'swap';
+  clearTabDropFeedback();
+  wrapper.classList.add(zone === 'swap' ? 'drop-swap' : zone === 'before' ? 'drop-before' : 'drop-after');
+  tabDropPlan = { targetId: tabId, zone };
+}
+
+function updateTabDragPlan(clientX, clientY) {
+  if (!tabDrag?.active) return;
+  const stripRect = el.platformTabs.getBoundingClientRect();
+  // 拖出标签条范围：保留上一个放置计划（回到标签条内继续改）
+  if (clientX < stripRect.left || clientX > stripRect.right || clientY < stripRect.top - 10 || clientY > stripRect.bottom + 10) return;
+  for (const wrap of el.platformTabs.querySelectorAll('.platform-tab-wrap[data-tab-id]')) {
+    const rect = wrap.getBoundingClientRect();
+    if (clientX < rect.left || clientX > rect.right) continue;
+    if (wrap.dataset.tabId === tabDrag.sourceId) { tabDropPlan = null; clearTabDropFeedback(); return; }
+    planTabDrop(wrap, wrap.dataset.tabId, clientX);
+    return;
+  }
+  // 标签条空白处＝移到末尾
+  const last = el.platformTabs.querySelector('.platform-tab-wrap[data-tab-id]:last-of-type');
+  if (!last) return;
+  clearTabDropFeedback();
+  last.classList.add('drop-after');
+  tabDropPlan = { targetId: last.dataset.tabId, zone: 'after' };
+}
+
+// 光泽 3D 拖影：真实 DOM 胶囊用 transform 跟随光标（比 setDragImage 的静态快照更顺滑），
+// 带顶部高光、悬浮投影和轻微倾斜；结束时统一移除
+function buildTabDragGhost(label) {
+  const ghost = document.createElement('div');
+  ghost.className = 'tab-drag-ghost';
+  ghost.textContent = label || '网页';
+  document.body.appendChild(ghost);
+  return ghost;
+}
+
+function moveTabDragGhost(clientX, clientY) {
+  if (!tabDrag?.ghost) return;
+  tabDrag.ghost.style.transform = `translate(${Math.round(clientX + 14)}px, ${Math.round(clientY + 16)}px) rotate(-3deg) scale(1.06)`;
+}
+
+// 拖到标签条左右边缘时自动横滚，让溢出一屏的标签也能拖到
+function startTabAutoScroll() {
+  if (tabDrag.scrollFrame) return;
+  const step = () => {
+    if (!tabDrag?.active) { if (tabDrag) tabDrag.scrollFrame = 0; return; }
+    const rect = el.platformTabs.getBoundingClientRect();
+    const edge = 44;
+    let delta = 0;
+    if (tabDrag.lastX < rect.left + edge) delta = -Math.ceil((rect.left + edge - tabDrag.lastX) / 4);
+    else if (tabDrag.lastX > rect.right - edge) delta = Math.ceil((tabDrag.lastX - (rect.right - edge)) / 4);
+    if (delta && el.platformTabs.scrollWidth > el.platformTabs.clientWidth) {
+      el.platformTabs.scrollLeft = Math.max(0, Math.min(el.platformTabs.scrollWidth, el.platformTabs.scrollLeft + delta));
+      updateTabDragPlan(tabDrag.lastX, tabDrag.lastY);
+    }
+    tabDrag.scrollFrame = requestAnimationFrame(step);
+  };
+  tabDrag.scrollFrame = requestAnimationFrame(step);
+}
+
+function stopTabAutoScroll() {
+  if (tabDrag?.scrollFrame) cancelAnimationFrame(tabDrag.scrollFrame);
+  if (tabDrag) tabDrag.scrollFrame = 0;
+}
+
+function beginTabDrag(sourceId, label, event) {
+  tabDrag = {
+    pointerId: event.pointerId, sourceId, label,
+    startX: event.clientX, startY: event.clientY,
+    active: false, ghost: null,
+    lastX: event.clientX, lastY: event.clientY, scrollFrame: 0,
+  };
+}
+
+function activateTabDrag() {
+  if (!tabDrag || tabDrag.active) return;
+  tabDrag.active = true;
+  tabDropPlan = null;
+  setTabStripDragging(true);
+  el.platformTabs.querySelector(`.platform-tab-wrap[data-tab-id="${CSS.escape(tabDrag.sourceId)}"]`)?.classList.add('dragging');
+  tabDrag.ghost = buildTabDragGhost(tabDrag.label);
+  moveTabDragGhost(tabDrag.lastX, tabDrag.lastY);
+  startTabAutoScroll();
+}
+
+function endTabDrag({ commit }) {
+  if (!tabDrag) return;
+  const plan = commit ? tabDropPlan : null;
+  const sourceId = tabDrag.sourceId;
+  stopTabAutoScroll();
+  setTabStripDragging(false);
+  clearTabDropFeedback();
+  removeTabDragGhost();
+  el.platformTabs.querySelectorAll('.platform-tab-wrap.dragging').forEach(wrap => wrap.classList.remove('dragging'));
+  tabDrag = null;
+  tabDropPlan = null;
+  if (commit && plan) commitTabReorder(sourceId, plan);
+}
+
+async function commitTabReorder(dragTabId, plan) {
+  if (!plan || !dragTabId || plan.targetId === dragTabId) return;
+  const ids = tabsWithIndexes(visibleTabs()).map(tab => tab.id);
+  // 拖拽途中列表可能已被刷新（SSE 推送、项目切换）：源或目标不在当前模式就安静放弃，不弹错误
+  if (!ids.includes(dragTabId) || !ids.includes(plan.targetId)) return;
+  let payload;
+  if (plan.zone === 'swap') {
+    payload = { swapTabId: dragTabId, withTabId: plan.targetId };
+  } else {
+    const targetIndex = ids.indexOf(plan.targetId);
+    // “插到目标之后”＝插到目标的下一个标签之前；目标已是当前模式最后一个则移到末尾。
+    // 下一个标签若正是被拖标签自己，说明拖回了原位，不提交。
+    const beforeTabId = plan.zone === 'before' ? plan.targetId : (ids[targetIndex + 1] || '');
+    if (beforeTabId === dragTabId) return;
+    payload = { moveTabId: dragTabId, beforeTabId };
+  }
+  tabPopIds.add(dragTabId);
+  if (plan.zone === 'swap') tabPopIds.add(plan.targetId);
+  try {
+    const browser = await API.reorderTabs(payload);
+    if (browser) applyBrowserState(browser);
+    showToast(plan.zone === 'swap' ? '已互换两个网页的位置' : '已调整网页顺序');
+  } catch (error) {
+    tabPopIds.clear();
+    showToast(error.message || '调整网页顺序失败');
+  }
+}
+
+// FLIP：重渲染前后按标签 id 记录横向位置，位置变化的标签滑入新槽位；
+// 被移动／互换的标签再叠加一次 Q 弹落定。reduced-motion 用户直接跳过动画。
+function captureTabLefts() {
+  const containerLeft = el.platformTabs.getBoundingClientRect().left;
+  const lefts = new Map();
+  for (const wrap of el.platformTabs.querySelectorAll('.platform-tab-wrap[data-tab-id]')) {
+    lefts.set(wrap.dataset.tabId, wrap.getBoundingClientRect().left - containerLeft + el.platformTabs.scrollLeft);
+  }
+  return lefts;
+}
+
+function playTabFlip(previousLefts) {
+  const containerRect = el.platformTabs.getBoundingClientRect();
+  const animate = !reducedMotion();
+  for (const wrap of el.platformTabs.querySelectorAll('.platform-tab-wrap[data-tab-id]')) {
+    const id = wrap.dataset.tabId;
+    if (animate && previousLefts.has(id)) {
+      const dx = previousLefts.get(id) - (wrap.getBoundingClientRect().left - containerRect.left + el.platformTabs.scrollLeft);
+      if (Math.abs(dx) > 1) {
+        wrap.style.transition = 'none';
+        wrap.style.transform = `translateX(${Math.round(dx)}px)`;
+        requestAnimationFrame(() => {
+          wrap.style.transition = '';
+          wrap.style.transform = '';
+          wrap.classList.add('flip-move');
+          const settle = () => { wrap.classList.remove('flip-move'); wrap.removeEventListener('transitionend', settle); };
+          wrap.addEventListener('transitionend', settle);
+          setTimeout(settle, 480);
+        });
+      }
+    }
+    if (animate && tabPopIds.has(id)) {
+      wrap.classList.add('flip-pop');
+      const clear = () => wrap.classList.remove('flip-pop');
+      wrap.addEventListener('animationend', clear, { once: true });
+      setTimeout(clear, 620);
+    }
+  }
+  tabPopIds.clear();
+}
+
+// —— 浏览器级标签操作（固定 / 静音 / 关闭其他与右侧）——
+
+async function pinTab(tab) {
+  try {
+    const browser = await API.pinTab(tab.id, !tab.pinned);
+    if (browser) applyBrowserState(browser);
+    showToast(tab.pinned ? '已取消固定' : '已固定：常用网页钉在列表最前，不怕误关');
+  } catch (error) {
+    showToast(error.message || '操作失败');
+  }
+}
+
+async function toggleTabMuted(tab) {
+  try {
+    const browser = await API.setTabMuted(tab.id, !tab.muted);
+    if (browser) applyBrowserState(browser);
+    showToast(tab.muted ? '已恢复声音' : `已静音「${tab.label || '网页'}」`);
+  } catch (error) {
+    showToast(error.message || '操作失败');
+  }
+}
+
+async function closeSiblingTabs(tab, scope) {
+  try {
+    const result = await API.closeOtherTabs(tab.id, scope);
+    if (result) applyBrowserState(result);
+    const count = Number(result?.closed) || 0;
+    const area = scope === 'left' ? '左侧' : scope === 'right' ? '右侧' : '其他';
+    showToast(count ? `已关闭${area} ${count} 个网页（Ctrl/⌘+Shift+T 可撤销）` : '没有可关闭的网页');
+  } catch (error) {
+    showToast(error.message || '关闭失败');
+  }
+}
+
+// —— 标签右键菜单：桌面版走系统原生菜单（WebContentsView 内嵌网页盖不住），浏览器版退回 DOM 浮层 ——
+
+function closeTabContextMenu() {
+  el.tabContextMenu.hidden = true;
+}
+
+function appendTabMenuItem(menu, label, { hint = '', disabled = false, danger = false, onPick = null } = {}) {
+  const item = document.createElement('button');
+  item.type = 'button';
+  item.className = 'tab-context-item' + (danger ? ' danger' : '');
+  item.setAttribute('role', 'menuitem');
+  item.disabled = disabled;
+  item.innerHTML = `<span class="tab-context-label"></span>${hint ? '<span class="tab-context-hint"></span>' : ''}`;
+  item.querySelector('.tab-context-label').textContent = label;
+  if (hint) item.querySelector('.tab-context-hint').textContent = hint;
+  item.addEventListener('click', () => {
+    closeTabContextMenu();
+    onPick?.();
+  });
+  menu.appendChild(item);
+}
+
+function appendTabMenuSeparator(menu) {
+  menu.appendChild(Object.assign(document.createElement('div'), { className: 'tab-context-separator' }));
+}
+
+function buildTabContextMenuItems(tab, label) {
+  const tabs = visibleTabs();
+  const index = tabs.findIndex(item => item.id === tab.id);
+  const items = [
+    { id: 'rename', label: '改名…' },
+    { id: 'duplicate', label: '再开一个标签' },
+    { id: 'copy-url', label: '复制网页地址', disabled: !/^https?:\/\//i.test(tab.url || '') },
+    { id: 'pin', label: tab.pinned ? '取消固定' : '固定标签' },
+  ];
+  if (tab.audible || tab.muted) {
+    items.push({ id: 'mute', label: tab.muted ? '取消静音' : '静音网页' });
+  }
+  items.push({ separator: true });
+  items.push({
+    id: 'restore',
+    label: '重新打开关闭的标签',
+    hint: document.body.classList.contains('is-macos') ? '⌘⇧T' : 'Ctrl+Shift+T',
+    accelerator: 'CmdOrCtrl+Shift+T',
+  });
+  items.push({ separator: true });
+  items.push({ id: 'close-left', label: '关闭左侧标签', danger: true, disabled: index <= 0 });
+  items.push({ id: 'close-others', label: '关闭其他标签', danger: true, disabled: tabs.length <= 1 });
+  items.push({ id: 'close-right', label: '关闭右侧标签', danger: true, disabled: index === tabs.length - 1 });
+  items.push({ separator: true });
+  items.push({ id: 'close', label: '关闭标签', danger: true, hint: '中键' });
+  return items;
+}
+
+async function runTabContextMenuAction(tab, label, action) {
+  switch (action) {
+    case 'rename':
+      openRenameDialog('tab', tab.id, label);
+      break;
+    case 'duplicate':
+      duplicateTab(tab);
+      break;
+    case 'copy-url':
+      await copyTextToClipboard(tab.url).then(() => showToast('已复制网页地址')).catch(error => showToast(error.message || '复制网址失败'));
+      break;
+    case 'pin':
+      pinTab(tab);
+      break;
+    case 'mute':
+      toggleTabMuted(tab);
+      break;
+    case 'restore':
+      await API.restoreClosedTab().then(applyBrowserState).catch(error => showToast(error.message || '恢复标签失败'));
+      break;
+    case 'close-left':
+      closeSiblingTabs(tab, 'left');
+      break;
+    case 'close-others':
+      closeSiblingTabs(tab, 'others');
+      break;
+    case 'close-right':
+      closeSiblingTabs(tab, 'right');
+      break;
+    case 'close':
+      closeTab(tab.id);
+      break;
+  }
+}
+
+async function openNativeTabContextMenu(tab, label, event) {
+  const result = await API.showTabContextMenu({
+    x: event.clientX,
+    y: event.clientY,
+    // 只传条目描述；动作由主进程按白名单 id 回传，再在渲染端分发。
+    items: buildTabContextMenuItems(tab, label).map(item => item.separator
+      ? { separator: true }
+      : { id: item.id, label: item.label, enabled: !item.disabled, accelerator: item.accelerator }),
+  });
+  if (!result || result.cancelled || !result.action) return;
+  await runTabContextMenuAction(tab, label, result.action);
+}
+
+function openDomTabContextMenu(tab, label, event) {
+  const menu = el.tabContextMenu;
+  menu.replaceChildren();
+  for (const item of buildTabContextMenuItems(tab, label)) {
+    if (item.separator) {
+      appendTabMenuSeparator(menu);
+      continue;
+    }
+    appendTabMenuItem(menu, item.label, {
+      hint: item.hint,
+      disabled: item.disabled,
+      danger: item.danger,
+      onPick: () => { runTabContextMenuAction(tab, label, item.id); },
+    });
+  }
+  menu.hidden = false;
+  // 贴近光标弹出并收进视口内
+  const width = menu.offsetWidth;
+  const height = menu.offsetHeight;
+  const left = Math.min(event.clientX, window.innerWidth - width - 8);
+  const top = Math.min(event.clientY, window.innerHeight - height - 8);
+  menu.style.left = `${Math.max(8, left)}px`;
+  menu.style.top = `${Math.max(8, top)}px`;
+  menu.querySelector('.tab-context-item:not(:disabled)')?.focus({ preventScroll: true });
+}
+
+function openTabContextMenu(tab, label, event) {
+  if (typeof API?.showTabContextMenu === 'function') {
+    openNativeTabContextMenu(tab, label, event).catch(error => showToast(error.message || '操作失败'));
+    return;
+  }
+  openDomTabContextMenu(tab, label, event);
+}
+
+// —— 页内查找（对标 Chrome 的 Ctrl/⌘+F）——
+
+let findBarVisible = false;
+
+function showFindBar() {
+  if (typeof API?.findInPage !== 'function') {
+    showToast('页内查找需要桌面版创作浏览器');
+    return;
+  }
+  findBarVisible = true;
+  el.findBar.hidden = false;
+  el.findInput.focus();
+  el.findInput.select();
+}
+
+function closeFindBar() {
+  if (!findBarVisible) return;
+  findBarVisible = false;
+  el.findBar.hidden = true;
+  if (typeof API?.stopFindInPage === 'function') API.stopFindInPage(false).catch(() => {});
+  if (state.browser?.tabId && typeof API?.focusBrowser === 'function') API.focusBrowser().catch(() => {});
+}
+
+async function runFind(forward, findNext) {
+  const text = el.findInput.value;
+  if (!text.trim()) {
+    el.findCount.textContent = '';
+    return;
+  }
+  try {
+    await API.findInPage(text, forward, findNext);
+  } catch (error) {
+    showToast(error.message || '查找失败');
+  }
+}
+
+function applyFindResult(result) {
+  if (!findBarVisible) return;
+  el.findCount.textContent = result.matches ? `${result.activeMatchOrdinal}/${result.matches}` : '无结果';
+}
+
+function renderPlatforms() {
+  const scrollLeft = el.platformTabs.scrollLeft;
+  const previousLefts = captureTabLefts();
   el.platformTabs.replaceChildren();
   for (const tab of tabsWithIndexes(visibleTabs())) {
     const service = serviceById(tab.serviceId);
     const baseLabel = serviceLabel(service);
     const label = tab.customName || (tab.index > 1 ? `${baseLabel}·${tab.index}` : baseLabel);
     const wrapper = document.createElement('span');
-    wrapper.className = 'platform-tab-wrap closable';
+    wrapper.className = 'platform-tab-wrap' + (tab.pinned ? ' pinned' : ' closable');
+    wrapper.dataset.tabId = tab.id;
     const button = document.createElement('button');
     button.className = 'platform-tab' + (tab.active ? ' active' : '');
     button.type = 'button';
     button.dataset.tabId = tab.id;
     button.dataset.service = tab.serviceId;
-    button.textContent = label;
-    button.title = `${label}｜双击、右键或按 F2 改名`;
+    // 固定标签对标浏览器：收缩为单字小钉位，悬停提示完整名称
+    button.textContent = tab.pinned ? label.slice(0, 1) : label;
+    if (tab.pinned) button.setAttribute('aria-label', `${label}（已固定）`);
+    button.title = tab.pinned
+      ? `${label}｜已固定：右键取消固定，拖动可调整顺序`
+      : `${label}｜双击或 F2 改名，右键更多操作`;
     button.setAttribute('aria-current', tab.active ? 'page' : 'false');
     button.addEventListener('click', () => selectTab(tab.id));
     button.addEventListener('dblclick', () => openRenameDialog('tab', tab.id, label));
-    button.addEventListener('contextmenu', event => {
-      event.preventDefault();
-      openRenameDialog('tab', tab.id, label);
-    });
     button.addEventListener('keydown', event => {
-      if (event.key !== 'F2') return;
+      if (event.key === 'F2') {
+        event.preventDefault();
+        openRenameDialog('tab', tab.id, label);
+      } else if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) {
+        event.preventDefault();
+        const rect = button.getBoundingClientRect();
+        openTabContextMenu(tab, label, { clientX: rect.left + 10, clientY: rect.bottom });
+      }
+    });
+    // 标签任何位置右键都能呼出操作菜单。
+    wrapper.addEventListener('contextmenu', event => {
       event.preventDefault();
-      openRenameDialog('tab', tab.id, label);
+      openTabContextMenu(tab, label, event);
     });
     wrapper.appendChild(button);
-    // 复制标签：同一平台在旁边再开一个独立网页，可无限多开并行对话。
-    const dup = document.createElement('button');
-    dup.type = 'button';
-    dup.className = 'platform-tab-dup';
-    dup.dataset.dupTab = tab.id;
-    dup.textContent = '⧉';
-    dup.title = `再开一个「${label}」网页（多开并行）`;
-    dup.setAttribute('aria-label', `复制标签 ${label}`);
-    dup.addEventListener('click', event => {
-      event.stopPropagation();
-      duplicateTab(tab);
+    // 标签声音角标：网页出声即显示，点一下整页静音（对标 Chrome 的页面声音管理）
+    if (tab.audible || tab.muted) {
+      const audio = document.createElement('button');
+      audio.type = 'button';
+      audio.className = 'platform-tab-audio' + (tab.muted ? ' muted' : '');
+      audio.textContent = tab.muted ? '🔇' : '🔊';
+      audio.title = `${label}｜${tab.muted ? '已静音，点击恢复声音' : '正在播放声音，点击静音'}`;
+      audio.setAttribute('aria-label', `${label} ${tab.muted ? '取消静音' : '静音'}`);
+      audio.addEventListener('click', event => {
+        event.stopPropagation();
+        toggleTabMuted(tab);
+      });
+      wrapper.appendChild(audio);
+    }
+    // 中键关闭（浏览器习惯）：pointerdown 阻止中键自动滚动，auxclick 触发关闭；
+    // 左键按下记录拖拽起点，移动超过阈值由 window 级 pointermove 接管为拖拽
+    wrapper.addEventListener('pointerdown', event => {
+      if (event.button === 1) { event.preventDefault(); return; }
+      if (event.button !== 0 || state.modeSwitchPending) return;
+      // 声音按钮上的按下不进入拖拽，保留其点击语义
+      if (event.target.closest('.platform-tab-audio')) return;
+      beginTabDrag(tab.id, label, event);
     });
-    wrapper.appendChild(dup);
-    const close = document.createElement('button');
-    close.type = 'button';
-    close.className = 'platform-remove platform-tab-close';
-    close.dataset.closeTab = tab.id;
-    close.setAttribute('aria-label', `关闭网页 ${label}`);
-    close.title = '关闭这个网页（登录保留）';
-    close.textContent = '×';
-    close.addEventListener('click', event => {
-      event.stopPropagation();
+    wrapper.addEventListener('auxclick', event => {
+      if (event.button !== 1) return;
+      event.preventDefault();
       closeTab(tab.id);
     });
-    wrapper.appendChild(close);
     el.platformTabs.appendChild(wrapper);
   }
   el.platformTabs.scrollLeft = scrollLeft;
+  playTabFlip(previousLefts);
+  // 拖拽途中被 SSE 等触发重渲染时，恢复整条标签栏的压暗与源标签拖动态
+  if (tabDrag?.active) {
+    setTabStripDragging(true);
+    el.platformTabs.querySelector(`.platform-tab-wrap[data-tab-id="${CSS.escape(tabDrag.sourceId)}"]`)?.classList.add('dragging');
+  }
   const duplicateService = serviceById(state.activeService);
   el.duplicateTabLabel.textContent = duplicateService ? serviceLabel(duplicateService) : '当前网站';
   el.duplicateTab.disabled = !duplicateService;
@@ -533,6 +977,8 @@ function renderPlatforms() {  const scrollLeft = el.platformTabs.scrollLeft;
   renderPlatformOpenList();
   renderHiddenPlatforms();
   renderPlatformCompatibility();
+  // 弹层打开期间同步刷新：增删/复制/重命名/拖拽换位都经 applyBrowserState → renderPlatforms 到达这里
+  refreshAllTabsList();
 }
 
 function renderPlatformOpenList() {
@@ -638,6 +1084,164 @@ function renderHiddenPlatforms() {
 function renderPlatformCompatibility() {
   // Grok 常驻兼容提示条已移除（Chrome UA + 反自动化 + 权限放宽后不再成立）。
   // 平台真实加载失败时仍由 browserRecovery 恢复条接管提示。
+}
+
+/* —— 「全部网页」弹层：搜索并切换当前模式已打开的网页 ——
+   弹层 DOM 由 creator.html 提供（allTabsButton / allTabsPopover / allTabsSearch / allTabsList），
+   任一 ID 缺失时整体静默停用，不影响标签条其余功能。显隐沿用 .hidden class（同 platformPopover）。 */
+
+// 仅对内置默认长名套短名显示；tooltip、aria、搜索匹配仍用完整名，用户改过名的一律原样显示。
+// 短名不能含 ·N 序号样式，避免与多开序号（GPT 提示词·4）和模型名混淆。
+const ALL_TABS_SHORT_NAMES = new Map([
+  ['GPT 提示词', 'GPT'],
+]);
+
+let allTabsWired = false;
+let allTabsShieldFrame = 0;
+
+function allTabsOpen() {
+  return !!el.allTabsPopover && !el.allTabsPopover.classList.contains('hidden');
+}
+
+function allTabFullLabel(tab) {
+  const baseLabel = serviceLabel(serviceById(tab.serviceId));
+  return tab.customName || (tab.index > 1 ? `${baseLabel}·${tab.index}` : baseLabel);
+}
+
+function allTabsOverlapsStage() {
+  if (!allTabsOpen()) return false;
+  const popover = el.allTabsPopover.getBoundingClientRect();
+  const stage = el.browserStage.getBoundingClientRect();
+  return popover.top < stage.bottom && popover.bottom > stage.top
+    && popover.left < stage.right && popover.right > stage.left;
+}
+
+// 弹层是 HTML 层，而平台网页是原生 WebContentsView（永远在 HTML 之上）：
+// 仅当弹层几何上压住网页舞台时才临时隐藏原生视图（与模态对话框同一机制），避免弹层被网页盖住。
+function syncAllTabsNativeShield() {
+  if (typeof API?.setPlatformViewHidden !== 'function') return;
+  const hidden = !!document.querySelector('dialog[open]') || allTabsOverlapsStage();
+  API.setPlatformViewHidden(hidden).catch(() => {});
+}
+
+function renderAllTabsList() {
+  if (!el.allTabsList) return;
+  const rawQuery = el.allTabsSearch?.value.trim() || '';
+  const query = rawQuery.toLowerCase();
+  const tabs = tabsWithIndexes(visibleTabs());
+  const matched = query
+    ? tabs.filter(tab => {
+        const full = allTabFullLabel(tab);
+        const platform = serviceById(tab.serviceId)?.label || '';
+        const numberedAlias = tab.index > 1 ? `${platform}·${tab.index}` : '';
+        return full.toLowerCase().includes(query)
+          || (ALL_TABS_SHORT_NAMES.get(full) || '').toLowerCase().includes(query)
+          || platform.toLowerCase().includes(query)
+          || numberedAlias.toLowerCase().includes(query);
+      })
+    : tabs;
+  el.allTabsList.replaceChildren();
+  if (!matched.length) {
+    const empty = document.createElement('div');
+    empty.className = 'all-tabs-empty';
+    empty.textContent = tabs.length ? `没有匹配「${rawQuery}」的网页` : '当前模式还没有打开的网页';
+    el.allTabsList.appendChild(empty);
+    return;
+  }
+  for (const tab of matched) {
+    const full = allTabFullLabel(tab);
+    const platform = serviceById(tab.serviceId)?.label || '';
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'all-tabs-item' + (tab.active ? ' active' : '');
+    item.dataset.tabId = tab.id;
+    item.setAttribute('role', 'option');
+    item.setAttribute('aria-selected', String(!!tab.active));
+    item.title = `${full}｜平台：${platform}`;
+    item.setAttribute('aria-label', `切换到「${full}」（平台：${platform}）${tab.active ? '，当前网页' : ''}`);
+    const name = document.createElement('span');
+    name.className = 'all-tabs-name';
+    // 多开序号（·2 ·3）和用户自定义名不套短名，保证列表名称始终能对应完整标签。
+    name.textContent = (!tab.customName && tab.index === 1 && ALL_TABS_SHORT_NAMES.get(full)) || full;
+    const badge = document.createElement('span');
+    badge.className = 'all-tabs-platform';
+    badge.textContent = platform;
+    item.append(name, badge);
+    item.addEventListener('click', () => {
+      closeAllTabsPopover();
+      selectTab(tab.id);
+    });
+    el.allTabsList.appendChild(item);
+  }
+}
+
+function refreshAllTabsList() {
+  if (allTabsOpen()) renderAllTabsList();
+}
+
+function openAllTabsPopover() {
+  el.allTabsPopover.classList.remove('hidden');
+  el.allTabsButton.setAttribute('aria-expanded', 'true');
+  if (el.allTabsSearch) el.allTabsSearch.value = '';
+  renderAllTabsList();
+  requestAnimationFrame(() => {
+    el.allTabsSearch?.focus();
+    // 等弹层布局尺寸生效后再判定是否需要让出原生网页视图
+    syncAllTabsNativeShield();
+  });
+}
+
+function closeAllTabsPopover({ refocus = false } = {}) {
+  if (!allTabsOpen()) return;
+  el.allTabsPopover.classList.add('hidden');
+  el.allTabsButton.setAttribute('aria-expanded', 'false');
+  if (refocus) el.allTabsButton.focus({ preventScroll: true });
+  syncAllTabsNativeShield();
+}
+
+function wireAllTabs() {
+  if (allTabsWired) return;
+  allTabsWired = true;
+  if (!el.allTabsButton || !el.allTabsPopover || !el.allTabsSearch || !el.allTabsList) return;
+  el.allTabsPopover.classList.add('hidden');
+  el.allTabsButton.setAttribute('aria-haspopup', 'dialog');
+  el.allTabsButton.setAttribute('aria-controls', 'allTabsPopover');
+  el.allTabsButton.setAttribute('aria-expanded', 'false');
+  el.allTabsButton.addEventListener('click', () => {
+    if (allTabsOpen()) closeAllTabsPopover({ refocus: true });
+    else openAllTabsPopover();
+  });
+  el.allTabsSearch.setAttribute('aria-label', '按名称或平台搜索已打开的网页');
+  if (!el.allTabsSearch.placeholder) el.allTabsSearch.placeholder = '搜索网页名称或平台…';
+  el.allTabsList.setAttribute('role', 'listbox');
+  el.allTabsList.setAttribute('aria-label', '全部网页');
+  // 搜索框按键就地消化，不进全局快捷键（Cmd/Ctrl+数字、F5、Esc 关菜单等）
+  el.allTabsSearch.addEventListener('keydown', event => {
+    event.stopPropagation();
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeAllTabsPopover({ refocus: true });
+    }
+  });
+  el.allTabsSearch.addEventListener('input', renderAllTabsList);
+  // 点击按钮与弹层之外关闭；窗口失焦时同右键菜单一并收起
+  document.addEventListener('pointerdown', event => {
+    if (!allTabsOpen()) return;
+    if (event.target.closest?.('#allTabsPopover, #allTabsButton')) return;
+    closeAllTabsPopover();
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key !== 'Escape' || !allTabsOpen()) return;
+    event.preventDefault();
+    closeAllTabsPopover({ refocus: true });
+  });
+  window.addEventListener('blur', () => closeAllTabsPopover());
+  // 弹层开着时窗口 resize 会跨越与网页舞台的重叠边界，遮挡判定不能只在开/关时求值
+  window.addEventListener('resize', () => {
+    if (!allTabsOpen()) return;
+    cancelAnimationFrame(allTabsShieldFrame);
+    allTabsShieldFrame = requestAnimationFrame(syncAllTabsNativeShield);
+  });
 }
 
 function closePlatformPopover() {
@@ -792,7 +1396,9 @@ function buildScriptGroup(group) {
       return (draft ? draft.text : item.text).trim();
     }).filter(Boolean).join('\n\n');
     if (!body) { showToast('这一组还没有可复制的剧本内容'); return; }
-    try { await copyTextToClipboard(body); showToast(`已复制「${group.name}」全部 ${group.items.length} 段`); }
+    // 按实际复制到的非空段计数，避免组内有空段时虚报数量
+    const copiedCount = body.split('\n\n').length;
+    try { await copyTextToClipboard(body); showToast(`已复制「${group.name}」共 ${copiedCount} 段`); }
     catch { showToast('复制失败，请重试'); }
   });
   head.append(copyAll);
@@ -1294,6 +1900,20 @@ function renderPromptTemplates() {
       const text = document.createElement('textarea');
       text.className = 'saved-template-text'; text.spellcheck = false;
       text.setAttribute('aria-label', '固定提示词正文'); text.value = draft.body;
+      // 复制固定在卡片顶部：长提示词不用滚到底部再找按钮
+      const topbar = document.createElement('div'); topbar.className = 'saved-template-topbar';
+      const copy = document.createElement('button');
+      copy.type = 'button'; copy.className = 'secondary-action saved-template-load saved-template-copy'; copy.textContent = '复制';
+      copy.title = '复制提示词全文';
+      copy.addEventListener('click', async () => {
+        if (!text.value.trim()) { showToast('提示词为空'); return; }
+        try {
+          await copyTextToClipboard(text.value);
+          activeTemplateIds[mode] = item.id; rememberTemplatePrompt(text.value, mode);
+          showToast('提示词已复制');
+        } catch { showToast('复制失败，请手动选择文本'); }
+      });
+      topbar.append(copy);
       const actions = document.createElement('div'); actions.className = 'saved-template-actions';
       const button = (label, handler, primary = false, extraClass = '') => {
         const b = document.createElement('button'); b.type = 'button'; b.textContent = label;
@@ -1318,15 +1938,7 @@ function renderPromptTemplates() {
           save.disabled = title.value === item.title && text.value === item.body;
         });
       }
-      button('复制', async () => {
-        if (!text.value.trim()) { showToast('提示词为空'); return; }
-        try {
-          await copyTextToClipboard(text.value);
-          activeTemplateIds[mode] = item.id; rememberTemplatePrompt(text.value, mode);
-          showToast('提示词已复制');
-        } catch { showToast('复制失败，请手动选择文本'); }
-      }, false, 'saved-template-copy');
-      body.append(title, text, actions); row.append(body);
+      body.append(topbar, title, text, actions); row.append(body);
     }
     el.promptTemplateList.append(row);
   }
@@ -1345,13 +1957,13 @@ function collectAssetItems(root) {
       for (const child of node.children || []) walk(child, depth + 1, path);
       return;
     }
-    if (node.kind === 'file' && ['image', 'video', 'audio'].includes(node.type)) {
+    if (node.kind === 'file' && ['image', 'video', 'audio', 'document', 'other'].includes(node.type)) {
       items.push({ ...node, folderPath: parentPath || '' });
     }
   };
   walk(root, 0, '');
   state.quickFolders = folders;
-  // 首次构建时把二级及更深文件夹收起来，只展开顶层分类。
+  // 首次构建时把二级及更深文件夹收起来，只展开顶层分类。浏览器下载固定在列表最下方，不进这棵树。
   if (!state.quickCollapseInit) {
     for (const folder of folders) {
       if (folder.depth >= 1) state.collapsedQuickFolders.add(folder.node.path || '');
@@ -1497,26 +2109,224 @@ function updateQuickDropLabel() {
     : `当前存入：${quickFolderLabel(state.quickAssetFolder)}`;
 }
 
+function assetRelativeFromSavePath(savePath) {
+  const library = String(state.config?.paths?.creativeAssetLibraryRoot || '').replace(/\\/g, '/').replace(/\/+$/, '');
+  const absolute = String(savePath || '').replace(/\\/g, '/');
+  if (!library || !(absolute === library || absolute.startsWith(`${library}/`))) return '';
+  return absolute.slice(library.length + 1);
+}
+
+function downloadCardType(kind) {
+  if (kind === 'image') return 'image';
+  if (kind === 'video') return 'video';
+  if (kind === 'audio') return 'audio';
+  return 'other';
+}
+
+function isBrowserDownloadFile(item) {
+  if (!item || ['image', 'video', 'audio'].includes(item.type)) return false;
+  // 老下载记录有时把媒体标成 other/file；扩展名仍须兜底排除。
+  return !/\.(?:png|jpe?g|webp|gif|bmp|avif|svg|heic|heif|tiff?|ico|psd|dng|cr2|mp4|mov|webm|mkv|avi|m4v|mpeg|mpg|wmv|flv|3gp|ogv|m2ts|mts|mp3|wav|m4a|aac|flac|ogg|opus|wma|aiff?|amr|ape)$/i.test(item.name || item.filename || '');
+}
+
+function browserDownloadRecords() {
+  const records = [];
+  const seen = new Set();
+  for (const download of state.downloads.values()) {
+    if (download.projectId && download.projectId !== state.projectId) continue;
+    if (download.source === 'import' || download.state === 'cancelled') continue;
+    seen.add(download.id);
+    records.push(download);
+  }
+  for (const item of state.production?.inbox || []) {
+    if (seen.has(item.download_key) || item.source === 'import') continue;
+    records.push({
+      id: item.download_key,
+      kind: item.kind,
+      filename: item.filename,
+      savePath: item.asset_path,
+      state: 'completed',
+      source: item.source || 'platform',
+      startedAt: item.created_at,
+      endedAt: item.updated_at,
+      receivedBytes: Number(item.size_bytes) || 0,
+      totalBytes: Number(item.size_bytes) || 0,
+    });
+  }
+  return records;
+}
+
+function browserDownloadFolderPath() {
+  const folder = (state.quickFolders || []).find(item => item.node?.name === '浏览器下载');
+  if (folder?.node?.path) return folder.node.path;
+  const project = (state.quickFolders || []).find(item => item.depth === 0);
+  const base = project?.node?.path || '';
+  return base ? `${base}/浏览器下载` : '浏览器下载';
+}
+
+function downloadDragToken(item) {
+  if (!item || item.downloadState === 'progressing' || item.downloadState === 'paused') return '';
+  if (item.path) return item.path;
+  if (item.downloadId) return `download:${item.downloadId}`;
+  return '';
+}
+
+function collectBrowserDownloadCards(folderPath) {
+  const byPath = new Map();
+  const loose = [];
+  for (const item of state.assetItems) {
+    const inDownloadFolder = item.folderPath === folderPath || (folderPath && item.folderPath.startsWith(`${folderPath}/`));
+    if (!item.path || !inDownloadFolder || !isBrowserDownloadFile(item)) continue;
+    byPath.set(item.path, { ...item, browserDownload: true });
+  }
+  for (const download of browserDownloadRecords()) {
+    if (!isBrowserDownloadFile({ type: downloadCardType(download.kind), name: download.filename })) continue;
+    const relative = assetRelativeFromSavePath(download.savePath);
+    if (!relative || !relative.startsWith(`${folderPath}/`)) continue;
+    const existing = relative && byPath.get(relative);
+    // 已完成的文件以磁盘扫描结果为准；历史入库记录不能复活已经删除的卡片。
+    if (!existing && download.state !== 'progressing' && download.state !== 'paused') continue;
+    const card = {
+      ...(existing || {}),
+      name: existing?.name || download.filename,
+      path: existing?.path || relative || '',
+      type: existing?.type || downloadCardType(download.kind),
+      folderPath: existing?.folderPath || (relative ? relative.split('/').slice(0, -1).join('/') : folderPath),
+      mtime: download.endedAt || download.startedAt || existing?.mtime || '',
+      downloadId: download.id,
+      downloadState: download.state,
+      downloadSource: download.source,
+      receivedBytes: download.receivedBytes,
+      totalBytes: download.totalBytes,
+      browserDownload: true,
+    };
+    if (card.path) byPath.set(card.path, card);
+    else loose.push(card);
+  }
+  const merged = [...byPath.values(), ...loose];
+  merged.sort((a, b) => {
+    const rank = item => (item.downloadState === 'progressing' || item.downloadState === 'paused') ? 0 : 1;
+    return rank(a) - rank(b) || String(b.mtime || '').localeCompare(String(a.mtime || ''));
+  });
+  return merged;
+}
+
+function bindBrowserDownloadDock() {
+  const toggle = document.getElementById('browserDownloadToggle');
+  const name = document.getElementById('browserDownloadName');
+  const children = document.getElementById('browserDownloadChildren');
+  if (!toggle || !children || toggle.dataset.bound === '1') return;
+  toggle.dataset.bound = '1';
+  const flip = () => {
+    const collapsed = children.classList.toggle('collapsed');
+    toggle.classList.toggle('expanded', !collapsed);
+    toggle.setAttribute('aria-expanded', String(!collapsed));
+    toggle.setAttribute('aria-label', `${collapsed ? '展开' : '收起'}浏览器下载`);
+    name?.setAttribute('aria-expanded', String(!collapsed));
+  };
+  toggle.addEventListener('click', flip);
+  name?.addEventListener('click', flip);
+}
+
+function refreshBrowserDownloadCards() {
+  bindBrowserDownloadDock();
+  const grid = document.getElementById('browserDownloadGrid');
+  if (!grid) return;
+  const rootPath = browserDownloadFolderPath();
+  const items = collectBrowserDownloadCards(rootPath);
+  const folders = state.quickFolders.filter(folder => folder.node?.path === rootPath || folder.node?.path?.startsWith(`${rootPath}/`));
+  if (state.browserDownloadFolderFilter && !folders.some(folder => folder.node.path === state.browserDownloadFolderFilter)) {
+    state.browserDownloadFolderFilter = '';
+  }
+  const current = state.browserDownloadFolderFilter || rootPath;
+  const nav = document.getElementById('browserDownloadNav');
+  if (nav) {
+    nav.replaceChildren();
+    if (current !== rootPath) {
+      const back = document.createElement('button');
+      back.type = 'button'; back.className = 'browser-download-folder';
+      back.textContent = '← 全部文件';
+      back.addEventListener('click', () => { state.browserDownloadFolderFilter = ''; refreshBrowserDownloadCards(); });
+      nav.appendChild(back);
+    }
+    for (const folder of folders.filter(folder => folder.parentPath === current)) {
+      const path = folder.node.path;
+      const count = items.filter(item => item.path === path || item.path?.startsWith(`${path}/`)).length;
+      const button = document.createElement('button');
+      button.type = 'button'; button.className = 'browser-download-folder';
+      button.textContent = `📁 ${folder.node.name} · ${count}`;
+      button.title = `打开文件夹「${folder.node.name}」`;
+      button.addEventListener('click', () => { state.browserDownloadFolderFilter = path; refreshBrowserDownloadCards(); });
+      nav.appendChild(button);
+    }
+    nav.hidden = !nav.childElementCount;
+  }
+  const shownItems = current === rootPath ? items : items.filter(item => item.path?.startsWith(`${current}/`));
+  const visible = shownItems.slice(0, state.browserDownloadLimit || 60);
+  grid.replaceChildren();
+  if (!visible.length) {
+    const empty = document.createElement('div');
+    empty.className = 'quick-folder-empty-hint';
+    empty.textContent = '这里暂无文件；浏览器下载的文档和压缩包会自动出现';
+    grid.appendChild(empty);
+  } else {
+    for (const item of visible) grid.appendChild(buildQuickFileCard(item));
+    if (shownItems.length > visible.length) {
+      const more = document.createElement('button');
+      more.type = 'button';
+      more.className = 'text-action browser-download-more';
+      more.textContent = `还有 ${shownItems.length - visible.length} 个文件`;
+      more.addEventListener('click', () => {
+        state.browserDownloadLimit = (state.browserDownloadLimit || 60) + 60;
+        refreshBrowserDownloadCards();
+      });
+      grid.appendChild(more);
+    }
+  }
+  const count = document.getElementById('browserDownloadCount');
+  if (count) count.textContent = String(items.length);
+  updateQuickSelectionUI();
+}
+
 function updateQuickCounts() {
   const imageCount = state.assetItems.filter(item => item.type === 'image').length;
   const videoCount = state.assetItems.filter(item => item.type === 'video').length;
   const audioCount = state.assetItems.filter(item => item.type === 'audio').length;
-  el.assetAccordionCount.textContent = `${imageCount} 张图片${videoCount ? ` · ${videoCount} 个视频` : ''}${audioCount ? ` · ${audioCount} 条音频` : ''}`;
+  const downloadCount = collectBrowserDownloadCards(browserDownloadFolderPath()).length;
+  el.assetAccordionCount.textContent = `${imageCount} 张图片${videoCount ? ` · ${videoCount} 个视频` : ''}${audioCount ? ` · ${audioCount} 条音频` : ''}${downloadCount ? ` · ${downloadCount} 个浏览器下载` : ''}`;
 }
 
 function buildQuickFileCard(item) {
   const wrapper = document.createElement('span');
   wrapper.className = 'asset-card-wrap';
   wrapper.draggable = true;
-  wrapper.dataset.assetPath = item.path;
-  wrapper.title = '拖到网页上传；拖到分类整理';
+  const dragToken = downloadDragToken(item);
+  if (dragToken) wrapper.dataset.assetPath = dragToken;
+  wrapper.title = item.downloadId
+    ? '可以拖到网页或剪映'
+    : (item.path ? '拖到网页上传；拖到分类整理' : (item.name || '浏览器下载'));
+  // 视频卡右键浮出：重建卡片时按内存状态恢复「已浮出」角标，不靠 DOM 残留
+  if (item.type === 'video' && item.path) {
+    wrapper.dataset.assetName = item.name;
+    wrapper.classList.toggle('is-floated', state.floatedVideoPaths.has(item.path));
+  }
   let dragged = false;
   wrapper.addEventListener('pointerdown', () => { dragged = false; });
   wrapper.addEventListener('dragstart', event => {
     dragged = true;
     wrapper.classList.add('asset-dragging');
+    if (item.downloadState === 'progressing' || item.downloadState === 'paused') {
+      event.preventDefault();
+      showToast('文件还在下载');
+      return;
+    }
+    if (!dragToken) {
+      event.preventDefault();
+      showToast('这个下载还不能拖出');
+      return;
+    }
     // 框选模式下拖动任一选中卡 = 按选入顺序整批拖出（原生多文件拖动进剪映）
-    if (state.quickSelectMode && state.quickSelectionOrder.includes(item.path) && typeof API.startAssetDragSelection === 'function') {
+    if (state.quickSelectMode && state.quickSelectionOrder.includes(dragToken) && typeof API.startAssetDragSelection === 'function') {
       event.preventDefault();
       event.stopPropagation();
       API.startAssetDragSelection([...state.quickSelectionOrder]);
@@ -1525,8 +2335,8 @@ function buildQuickFileCard(item) {
     if (state.config?.nativeQuickAssetDrag && typeof API.startAssetDrag === 'function') {
       event.preventDefault();
       event.stopPropagation();
-      API.startAssetDrag(item.path);
-    } else if (event.dataTransfer) {
+      API.startAssetDrag(dragToken);
+    } else if (event.dataTransfer && item.path) {
       event.dataTransfer.setData('application/x-vos-asset', item.path);
       event.dataTransfer.effectAllowed = 'move';
       showToast('拖入网页需要最新版桌面程序，请保存网页内容后完全退出并重新打开应用');
@@ -1538,14 +2348,19 @@ function buildQuickFileCard(item) {
   button.className = `asset-image-card ${item.type}`;
   button.draggable = true;
   button.title = `${item.name}\n点击放大或预览，可再跳转完整库`;
+  if (typeof API.floatVideoAsset === 'function' && item.type === 'video' && item.path && item.downloadState !== 'progressing' && item.downloadState !== 'paused') {
+    button.title += state.floatedVideoPaths.has(item.path)
+      ? '\n已浮出置顶小窗；点小窗 × 后恢复'
+      : (typeof API.floatVideoAsset === 'function' ? '\n右键浮出置顶小窗，可直接拖进剪映' : '');
+  }
   let preview;
-  if (item.type === 'image') {
+  if (item.type === 'image' && item.path) {
     preview = document.createElement('img');
     preview.src = assetImageUrl(item.path);
     preview.alt = item.name;
     preview.loading = 'lazy';
     preview.draggable = false;
-  } else if (item.type === 'video') {
+  } else if (item.type === 'video' && item.path) {
     // 视频封面：#t=0.1 seek 到开头附近的帧作封面（约等于首帧）；preload=metadata 为加载提示，
     // seek 时浏览器会按需下载开头一段数据（非严格只取文件头）。懒加载：进入预加载区才挂 src。
     const cover = document.createElement('video');
@@ -1574,7 +2389,7 @@ function buildQuickFileCard(item) {
     preview.setAttribute('aria-hidden', 'true');
     const icon = document.createElement('img');
     icon.className = 'asset-video-icon';
-    icon.src = UIIcons.src(item.type === 'video' ? 'video' : item.type === 'audio' ? 'audio' : 'document');
+    icon.src = UIIcons.src(item.type === 'video' ? 'video' : item.type === 'audio' ? 'audio' : item.type === 'image' ? 'image' : 'document');
     icon.alt = '';
     icon.draggable = false;
     preview.appendChild(icon);
@@ -1583,16 +2398,48 @@ function buildQuickFileCard(item) {
   label.className = 'asset-card-label';
   label.textContent = item.name;
   button.append(preview, label);
+  if (item.downloadState === 'progressing' || item.downloadState === 'paused') {
+    button.classList.add('is-downloading');
+    const progress = document.createElement('progress');
+    progress.className = 'browser-download-progress';
+    const total = Number(item.totalBytes) || 0;
+    const received = Number(item.receivedBytes) || 0;
+    progress.max = total || 1;
+    progress.value = total ? Math.min(received, total) : 0;
+    if (!total && item.downloadState === 'progressing') progress.removeAttribute('value');
+    progress.setAttribute('aria-label', `${item.name}：${downloadStateLabel({ state: item.downloadState, source: item.downloadSource })}`);
+    button.appendChild(progress);
+  }
   button.addEventListener('click', event => {
     if (dragged) { event.preventDefault(); return; }
     // 框选模式下单击卡片 = 按点击顺序选入/移出导入序列；单击仍预览与选入互斥
-    if (state.quickSelectMode) {
-      toggleQuickSelection(item.path);
+    if (state.quickSelectMode && dragToken) {
+      toggleQuickSelection(dragToken);
       return;
     }
-    if (item.type === 'image' || item.type === 'video' || item.type === 'audio') openQuickPreview(item);
-    else openFullAssetLibrary();
+    if (item.downloadState === 'progressing' || item.downloadState === 'paused') {
+      showToast('文件还在下载');
+      return;
+    }
+    if (item.path && (item.type === 'image' || item.type === 'video' || item.type === 'audio')) openQuickPreview(item);
+    else if (item.path && typeof API.showCreativeAsset === 'function') {
+      API.showCreativeAsset(item.path).catch(error => showToast(error.message || '无法在文件夹中显示'));
+    } else if (item.downloadId && typeof API.openDownload === 'function') {
+      Promise.resolve(API.openDownload(item.downloadId)).then(opened => {
+        if (opened === false) showToast('文件不在本机项目目录里，不能定位');
+      }).catch(error => showToast(error.message || '无法在文件夹中显示'));
+    } else openFullAssetLibrary();
   });
+  // 仅视频卡右键浮出置顶小窗；preventDefault+stopPropagation 不影响框选（框选只在树空白处
+  // 启动，卡片本来就排除在拉框起点外）、单击预览、原生拖拽与删除/复制按钮。
+  // 图片、音频、文件卡右键行为保持不变（走系统原生菜单）。
+  if (item.type === 'video' && item.path && item.downloadState !== 'progressing' && item.downloadState !== 'paused') {
+    button.addEventListener('contextmenu', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      floatQuickVideo(item);
+    });
+  }
   wrapper.appendChild(button);
   if (item.type === 'image' && typeof API.copyAsset === 'function') {
   const copyButton = document.createElement('button');
@@ -1616,27 +2463,32 @@ function buildQuickFileCard(item) {
     });
     wrapper.appendChild(copyButton);
   }
-  if (typeof API.deleteAsset === 'function') {
+  const deleteAsset = item.browserDownload ? API.deleteBrowserDownload : API.deleteAsset;
+  if (item.path && item.downloadState !== 'progressing' && item.downloadState !== 'paused' && typeof deleteAsset === 'function') {
     const deleteButton = document.createElement('button');
     deleteButton.type = 'button';
     deleteButton.className = 'asset-quick-delete';
     deleteButton.dataset.deleteAsset = item.path;
     deleteButton.textContent = '✕';
-    deleteButton.title = '删除（移到废纸篓）';
+    deleteButton.title = item.browserDownload ? '永久删除下载文件' : '删除（移到废纸篓）';
     deleteButton.setAttribute('aria-label', `删除 ${item.name}`);
     deleteButton.addEventListener('click', async event => {
       event.stopPropagation();
-      if (!confirm(`删除「${item.name}」？文件会移到废纸篓，可随时恢复。`)) return;
+      const prompt = item.browserDownload
+        ? `永久删除「${item.name}」？此操作不会移到废纸篓，无法撤销。`
+        : `删除「${item.name}」？文件会移到废纸篓，可随时恢复。`;
+      if (!confirm(prompt)) return;
       deleteButton.disabled = true;
       try {
-        await API.deleteAsset(item.path);
+        await deleteAsset(item.path);
         // 已删资产不再留在框选导入序列，避免整批拖出时因缺失文件失败
         const selIdx = state.quickSelectionOrder.indexOf(item.path);
         if (selIdx !== -1) {
           state.quickSelectionOrder.splice(selIdx, 1);
           updateQuickSelectionUI();
         }
-        showToast(`已移到废纸篓：${item.name}`);
+        if (item.downloadId) state.downloads.delete(item.downloadId);
+        showToast(`${item.browserDownload ? '已永久删除' : '已移到废纸篓'}：${item.name}`);
         await loadAssetItems();
       } catch (error) {
         showToast(error.message || '删除失败');
@@ -1732,7 +2584,10 @@ function buildQuickFolderRow(folder) {
     importLocalFilesToFolder(event.dataTransfer.files, key);
   });
 
-  row.append(disclosure, name, count, dropHint);
+  // 非根分类行末尾的独立拖动手柄：只做同级显示排序；根「全部资产」固定，不给手柄。
+  row.append(disclosure, name, count);
+  if (folder.depth > 0) row.append(buildQuickFolderGrip(row, folder));
+  row.append(dropHint);
 
   // Obsidian 式：展开文件夹后，里面的图片直接嵌在树下（连同子文件夹一起收纳）。
   // wrapper 必须与行平级（作为兄弟节点），折叠动画才能切换到正确的元素。
@@ -1740,7 +2595,9 @@ function buildQuickFolderRow(folder) {
   wrapper.className = 'quick-children' + (collapsed ? ' collapsed' : '');
   const inner = document.createElement('div');
   inner.className = 'quick-children-inner';
-  const directFiles = state.assetItems.filter(item => item.folderPath === key).slice(0, 30);
+  const directFiles = folder.node.name === '浏览器下载'
+    ? []
+    : state.assetItems.filter(item => item.folderPath === key).slice(0, 30);
   if (directFiles.length) {
     const grid = document.createElement('div');
     grid.className = 'quick-file-grid';
@@ -1748,7 +2605,7 @@ function buildQuickFolderRow(folder) {
     inner.appendChild(grid);
   }
   wrapper.appendChild(inner);
-  appendQuickFolderRows(inner, state.quickFolders || [], key, new Set());
+  if (folder.node.name !== '浏览器下载') appendQuickFolderRows(inner, state.quickFolders || [], key, new Set());
   if (!inner.childElementCount) {
     const empty = document.createElement('div');
     empty.className = 'quick-folder-empty-hint';
@@ -1760,13 +2617,279 @@ function buildQuickFolderRow(folder) {
 }
 
 function appendQuickFolderRows(parent, folders, parentPath, done) {
-  const pending = folders.filter(item => item.parentPath === parentPath && !done.has(item));
-  for (const folder of pending) {
+  const pending = folders.filter(item => item.parentPath === parentPath && !done.has(item) && item.node?.name !== '浏览器下载');
+  // 按剧本持久化的同级顺序渲染；未记录的新分类按接口树原始顺序追加在后。
+  for (const folder of orderAssetFolderEntries(pending, parentPath)) {
     done.add(folder);
     const { row, wrapper } = buildQuickFolderRow(folder);
     parent.appendChild(row);
     parent.appendChild(wrapper);
   }
+}
+
+/* ---------- 分类同级排序（仅显示顺序，按剧本持久化到 localStorage） ---------- */
+// 只重排左侧分类树的显示次序，不调用任何移动接口：磁盘上的文件夹与资产路径不动。
+// 顺序键 videoOS.assetFolderOrder.v1.<projectId>，值 { "<parentPath>": ["<childFolderPath>", ...] }。
+// 读取时忽略失效路径；未记录的分类按接口树原始顺序排在已记录项之后；根「全部资产」固定不参与。
+const ASSET_FOLDER_ORDER_KEY_PREFIX = 'videoOS.assetFolderOrder.v1.';
+let assetFolderOrderCache = { projectId: null, data: {} };
+
+function assetFolderOrderStorageKey() {
+  return `${ASSET_FOLDER_ORDER_KEY_PREFIX}${state.projectId}`;
+}
+
+function loadAssetFolderOrder() {
+  if (assetFolderOrderCache.projectId === state.projectId) return assetFolderOrderCache.data;
+  let data = {};
+  try {
+    const parsed = JSON.parse(localStorage.getItem(assetFolderOrderStorageKey()) || 'null');
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      for (const [parentPath, list] of Object.entries(parsed)) {
+        if (!Array.isArray(list)) continue;
+        const paths = [...new Set(list.filter(path => typeof path === 'string' && path))];
+        if (paths.length) data[parentPath] = paths;
+      }
+    }
+  } catch { data = {}; }
+  assetFolderOrderCache = { projectId: state.projectId, data };
+  return data;
+}
+
+function saveAssetFolderOrder(order) {
+  try {
+    localStorage.setItem(assetFolderOrderStorageKey(), JSON.stringify(order));
+    assetFolderOrderCache = { projectId: state.projectId, data: order };
+    return true;
+  } catch (error) {
+    showToast(`分类顺序保存失败：${error.message}`);
+    return false;
+  }
+}
+
+// 把同级分类按已保存顺序排在前面，其余保持原相对顺序（Array.sort 稳定）追加在后。
+function orderAssetFolderEntries(entries, parentPath) {
+  const list = loadAssetFolderOrder()[parentPath];
+  if (!Array.isArray(list) || !list.length || entries.length < 2) return entries;
+  const rank = new Map(list.map((path, index) => [path, index]));
+  const unknownRank = Number.MAX_SAFE_INTEGER;
+  return [...entries].sort((a, b) => {
+    const pathA = a.node.path || '';
+    const pathB = b.node.path || '';
+    const rankA = rank.has(pathA) ? rank.get(pathA) : unknownRank;
+    const rankB = rank.has(pathB) ? rank.get(pathB) : unknownRank;
+    return rankA - rankB;
+  });
+}
+
+function commitAssetFolderOrder(parentPath, entries) {
+  const paths = entries.map(item => item.node.path || '');
+  const order = { ...loadAssetFolderOrder() };
+  if (JSON.stringify(order[parentPath] || []) === JSON.stringify(paths)) return false;
+  order[parentPath] = paths;
+  return saveAssetFolderOrder(order);
+}
+
+// 当前同级分类（含顺序应用结果）：排除根「全部资产」与固定入口浏览器下载。
+function quickFolderSiblings(folder) {
+  return orderAssetFolderEntries(
+    (state.quickFolders || []).filter(item =>
+      item.depth > 0 && item.parentPath === folder.parentPath && item.node?.name !== '浏览器下载'),
+    folder.parentPath || ''
+  );
+}
+
+function persistQuickFolderSiblingOrder(source, ordered) {
+  if (!commitAssetFolderOrder(source.parentPath || '', ordered)) return false;
+  renderQuickFolderTree();
+  return true;
+}
+
+function quickFolderRowByPath(folderPath) {
+  return el.quickFolderTree.querySelector(`[data-folder-path="${CSS.escape(folderPath)}"]`);
+}
+
+function refocusQuickFolderGrip(folderPath) {
+  el.quickFolderTree
+    .querySelector(`[data-folder-path="${CSS.escape(folderPath)}"] > .quick-folder-grip`)
+    ?.focus();
+}
+
+function moveQuickFolderByKeyboard(folder, delta) {
+  if (folder.depth === 0) return;
+  const siblings = quickFolderSiblings(folder);
+  const sourcePath = folder.node.path || '';
+  const index = siblings.findIndex(item => (item.node.path || '') === sourcePath);
+  const nextIndex = index + delta;
+  if (index === -1 || siblings.length < 2 || nextIndex < 0 || nextIndex >= siblings.length) {
+    showToast(delta < 0 ? '已经在同级最前面' : '已经在同级最后面');
+    return;
+  }
+  const ordered = [...siblings];
+  const [moved] = ordered.splice(index, 1);
+  ordered.splice(nextIndex, 0, moved);
+  if (persistQuickFolderSiblingOrder(folder, ordered)) refocusQuickFolderGrip(sourcePath);
+}
+
+// —— 分类手柄拖拽换位（指针方案，与标签拖拽同一套实现习惯）——
+// 从手柄按下移动超过阈值才进入拖动；候选插入位置只在同一父文件夹的兄弟行之间解析，
+// 指到其他层级、素材卡片或空白时不产生插入计划。Esc 取消；靠近树上/下边缘自动纵滚。
+const QUICK_FOLDER_DRAG_THRESHOLD = 5;
+let folderGripDrag = null; // { pointerId, row, folder, startX, startY, lastX, lastY, active, plan, markedPath, markedPosition, scrollFrame }
+
+function beginQuickFolderGripDrag(event, row, folder) {
+  if (event.button !== 0 || folder.depth === 0) return;
+  event.currentTarget.setPointerCapture(event.pointerId);
+  folderGripDrag = {
+    pointerId: event.pointerId, row, folder,
+    startX: event.clientX, startY: event.clientY,
+    lastX: event.clientX, lastY: event.clientY,
+    active: false, plan: null, markedPath: '', markedPosition: '', scrollFrame: 0,
+  };
+}
+
+function activateQuickFolderDrag() {
+  if (!folderGripDrag || folderGripDrag.active) return;
+  folderGripDrag.active = true;
+  folderGripDrag.plan = null;
+  folderGripDrag.row?.classList.add('folder-drag-source');
+  document.body.classList.add('folder-reordering');
+  startQuickFolderAutoScroll();
+}
+
+function clearQuickFolderDropMarkers() {
+  el.quickFolderTree.querySelectorAll('.folder-drop-above, .folder-drop-below')
+    .forEach(node => node.classList.remove('folder-drop-above', 'folder-drop-below'));
+}
+
+function markQuickFolderDropPlan(plan) {
+  const drag = folderGripDrag;
+  if (!drag) return;
+  // 每次移动都全量重标：SSE 刷新会重建行节点，按 plan 短路会让指示线留在游离节点上丢失
+  clearQuickFolderDropMarkers();
+  drag.markedPath = plan?.path || '';
+  drag.markedPosition = plan?.position || '';
+  if (plan?.path) {
+    quickFolderRowByPath(plan.path)?.classList.add(plan.position === 'before' ? 'folder-drop-above' : 'folder-drop-below');
+  }
+}
+
+function reattachQuickFolderDragSourceRow() {
+  const drag = folderGripDrag;
+  if (!drag) return;
+  // 拖拽中途 SSE 刷新重建 DOM：旧行游离，重新定位当前源行并补回拖动中视觉态
+  if (drag.row?.isConnected) return;
+  drag.row = quickFolderRowByPath(drag.folder.node.path || '');
+  drag.row?.classList.add('folder-drag-source');
+}
+
+function updateQuickFolderDropPlan(clientY) {
+  if (!folderGripDrag?.active) return;
+  reattachQuickFolderDragSourceRow();
+  const sourcePath = folderGripDrag.folder.node.path || '';
+  // 只接受树视口内的落点：指针移出左侧树（如拖到右侧网页列或面板底部）不产生插入计划，
+  // 松手不会误排序；候选行每次实时解析，拖拽途中刷新重建 DOM 后指示线仍落在最新行上
+  const treeRect = el.quickFolderTree.getBoundingClientRect();
+  if (clientY < treeRect.top || clientY > treeRect.bottom
+    || folderGripDrag.lastX < treeRect.left || folderGripDrag.lastX > treeRect.right) {
+    folderGripDrag.plan = null;
+    markQuickFolderDropPlan(null);
+    return;
+  }
+  const candidates = quickFolderSiblings(folderGripDrag.folder)
+    .map(item => quickFolderRowByPath(item.node.path || ''))
+    .filter(node => node?.isConnected && (node.dataset.folderPath || '') !== sourcePath);
+  let plan = null;
+  for (const node of candidates) {
+    const rect = node.getBoundingClientRect();
+    if (clientY < rect.top + rect.height / 2) {
+      plan = { path: node.dataset.folderPath || '', position: 'before' };
+      break;
+    }
+  }
+  if (!plan && candidates.length) {
+    const last = candidates[candidates.length - 1];
+    plan = { path: last.dataset.folderPath || '', position: 'after' };
+  }
+  folderGripDrag.plan = plan;
+  markQuickFolderDropPlan(plan);
+}
+
+function startQuickFolderAutoScroll() {
+  if (folderGripDrag.scrollFrame) return;
+  const step = () => {
+    if (!folderGripDrag?.active) { if (folderGripDrag) folderGripDrag.scrollFrame = 0; return; }
+    const scroller = el.quickFolderTree;
+    const rect = scroller.getBoundingClientRect();
+    const edge = 32;
+    let delta = 0;
+    if (folderGripDrag.lastY < rect.top + edge) delta = -Math.ceil((rect.top + edge - folderGripDrag.lastY) / 4);
+    else if (folderGripDrag.lastY > rect.bottom - edge) delta = Math.ceil((folderGripDrag.lastY - (rect.bottom - edge)) / 4);
+    if (delta) {
+      scroller.scrollTop = Math.max(0, scroller.scrollTop + delta);
+      updateQuickFolderDropPlan(folderGripDrag.lastY);
+    }
+    folderGripDrag.scrollFrame = requestAnimationFrame(step);
+  };
+  folderGripDrag.scrollFrame = requestAnimationFrame(step);
+}
+
+function stopQuickFolderAutoScroll() {
+  if (folderGripDrag?.scrollFrame) cancelAnimationFrame(folderGripDrag.scrollFrame);
+  if (folderGripDrag) folderGripDrag.scrollFrame = 0;
+}
+
+function endQuickFolderGripDrag({ commit }) {
+  if (!folderGripDrag) return;
+  const plan = commit ? folderGripDrag.plan : null;
+  const source = folderGripDrag.folder;
+  stopQuickFolderAutoScroll();
+  document.body.classList.remove('folder-reordering');
+  clearQuickFolderDropMarkers();
+  el.quickFolderTree.querySelectorAll('.folder-drag-source').forEach(node => node.classList.remove('folder-drag-source'));
+  folderGripDrag = null;
+  if (commit && plan && source) commitQuickFolderReorder(source, plan);
+}
+
+function commitQuickFolderReorder(source, plan) {
+  // 拖拽途中树可能已被 SSE 刷新：以当前 state 的同级表为准，源或目标不存在就安静放弃
+  const siblings = quickFolderSiblings(source);
+  const sourcePath = source.node.path || '';
+  const fromIndex = siblings.findIndex(item => (item.node.path || '') === sourcePath);
+  if (fromIndex === -1 || !plan.path || plan.path === sourcePath) return;
+  const ordered = [...siblings];
+  const [moved] = ordered.splice(fromIndex, 1);
+  let insertIndex = ordered.findIndex(item => (item.node.path || '') === plan.path);
+  if (insertIndex === -1) return;
+  if (plan.position === 'after') insertIndex += 1;
+  ordered.splice(insertIndex, 0, moved);
+  if (persistQuickFolderSiblingOrder(source, ordered)) refocusQuickFolderGrip(sourcePath);
+}
+
+function onQuickFolderGripKeydown(event, folder) {
+  if (event.key === 'Escape' && folderGripDrag?.active) {
+    event.preventDefault();
+    endQuickFolderGripDrag({ commit: false });
+    return;
+  }
+  if (!event.altKey || event.ctrlKey || event.metaKey || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return;
+  if (folderGripDrag?.active) return;
+  event.preventDefault();
+  event.stopPropagation();
+  moveQuickFolderByKeyboard(folder, event.key === 'ArrowUp' ? -1 : 1);
+}
+
+function buildQuickFolderGrip(row, folder) {
+  const grip = document.createElement('button');
+  grip.type = 'button';
+  grip.className = 'quick-folder-grip';
+  grip.draggable = false;
+  const label = `拖动调整「${folder.node.name}」的同级顺序（只在本级前后插入）；聚焦后按 Alt+↑ 或 Alt+↓ 与相邻同级换位`;
+  grip.title = label;
+  grip.setAttribute('aria-label', label);
+  grip.setAttribute('aria-keyshortcuts', 'Alt+ArrowUp Alt+ArrowDown');
+  grip.addEventListener('pointerdown', event => beginQuickFolderGripDrag(event, row, folder));
+  grip.addEventListener('keydown', event => onQuickFolderGripKeydown(event, folder));
+  return grip;
 }
 
 /* ---------- 快捷面板框选导入（剪映联动） ---------- */
@@ -1794,13 +2917,65 @@ function updateQuickSelectionUI() {
 function setQuickSelectMode(on) {
   state.quickSelectMode = !!on;
   el.quickMultiSelect.setAttribute('aria-pressed', String(state.quickSelectMode));
-  el.quickMultiSelect.textContent = `框选模式：${state.quickSelectMode ? '开' : '关'}`;
+  el.quickMultiSelect.textContent = `框选：${state.quickSelectMode ? '开' : '关'}`;
   el.quickTools.hidden = false;
   if (!state.quickSelectMode) {
     state.quickSelectionOrder.length = 0;
   }
   updateQuickSelectionUI();
   el.quickFolderTree.classList.toggle('select-mode', state.quickSelectMode);
+}
+
+/* ---------- 视频卡右键浮出（置顶小窗拖进剪映） ---------- */
+// 浮窗本体是桌面程序的原生置顶窗口，这里只负责右键触发、角标状态与关闭事件回流。
+// 同一视频重复右键 = 再次调用 floatVideoAsset（桌面程序把已有浮窗置前），UI 不把它当作关闭开关；
+// 唯一关闭入口是浮窗自己的 ×，关闭事件经 onFloatVideoClosed 回流后撤掉角标。
+// 浮出状态只存内存（floatedVideoPaths）：切换剧本清空、刷新自动复位，绝不写 localStorage，
+// 避免浮窗早已关闭时左栏还残留「已浮出」假角标。
+function floatedVideoCardNodes(assetPath) {
+  return document.querySelectorAll(`[data-asset-path="${CSS.escape(assetPath)}"]`);
+}
+
+function applyFloatedVideoCardState(assetPath) {
+  const floated = state.floatedVideoPaths.has(assetPath);
+  floatedVideoCardNodes(assetPath).forEach(node => {
+    node.classList.toggle('is-floated', floated);
+    const card = node.querySelector('.asset-image-card');
+    if (!card) return;
+    if (floated) card.setAttribute('aria-label', `${node.dataset.assetName || ''} 已浮出为置顶小窗`);
+    else card.removeAttribute('aria-label');
+  });
+}
+
+function applyAllFloatedVideoCardState() {
+  for (const assetPath of state.floatedVideoPaths.keys()) applyFloatedVideoCardState(assetPath);
+}
+
+async function floatQuickVideo(item) {
+  if (typeof API.floatVideoAsset !== 'function') {
+    showToast('右键浮出视频小窗需要更新桌面程序后使用');
+    return;
+  }
+  try {
+    const result = await API.floatVideoAsset(item.path);
+    // 以卡片携带的相对路径为准记状态；桌面程序返回的 path 仅作关闭事件对账。
+    state.floatedVideoPaths.set(item.path, result?.path || item.path);
+    applyFloatedVideoCardState(item.path);
+    showToast(`已浮出置顶小窗：${item.name}`);
+  } catch (error) {
+    showToast(error.message || '浮出视频小窗失败，请重试');
+  }
+}
+
+function handleFloatVideoClosed(payload) {
+  const closedPath = payload?.path;
+  if (!closedPath) return;
+  // 关闭事件可能带卡片相对路径，也可能带桌面程序登记的返回路径，两种都对上账。
+  for (const [assetPath, floatedPath] of state.floatedVideoPaths) {
+    if (assetPath !== closedPath && floatedPath !== closedPath) continue;
+    state.floatedVideoPaths.delete(assetPath);
+    applyFloatedVideoCardState(assetPath);
+  }
 }
 
 function setupQuickMarquee() {
@@ -1860,6 +3035,7 @@ function renderQuickFolderTree() {
   resetQuickCoverObserver();  // 树与卡片整体重建：先解除旧封面节点的观察登记
   el.quickFolderTree.replaceChildren();
   appendQuickFolderRows(el.quickFolderTree, state.quickFolders || [], '', new Set());
+  refreshBrowserDownloadCards();
   setupQuickMarquee();
   updateQuickSelectionUI();
   if (el.quickTools) el.quickTools.hidden = false;  // 有资产分类即提供框选导入入口
@@ -1930,7 +3106,8 @@ async function loadMoreInbox() {
 // 恢复钩子按对话框持久挂载（幂等推送），避免 once 监听被提前消耗导致视图滞留隐藏。
 function syncCreatorDialogVisibility() {
   if (typeof API.setPlatformViewHidden === 'function') {
-    API.setPlatformViewHidden(!!document.querySelector('dialog[open]')).catch(() => {});
+    // 模态对话框与「全部网页」弹层同为 HTML 层：两者都关闭时才恢复原生网页视图。
+    API.setPlatformViewHidden(!!document.querySelector('dialog[open]') || allTabsOverlapsStage()).catch(() => {});
   }
 }
 
@@ -2137,6 +3314,8 @@ function renderDownloads() {
     el.downloadList.appendChild(more);
   }
   restoreDownloadFocus(focusTarget);
+  refreshBrowserDownloadCards();
+  updateQuickCounts();
 }
 
 // 快捷面板视频封面懒加载：与完整资产库同策略，预加载区（视口外扩 200px）内才挂 src；
@@ -2259,6 +3438,8 @@ async function selectService(serviceId) {
 async function setMode(mode) {
   if (state.modeSwitchPending) return false;
   const nextMode = mode === 'video' ? 'video' : 'image';
+  closeTabContextMenu();
+  closeFindBar();
   return restoreModeBrowser(nextMode);
 }
 
@@ -2344,6 +3525,8 @@ function applyBrowserState(browser) {
 async function selectTab(tabId) {
   if (state.modeSwitchPending) return;
   if (!tabId) return;
+  closeTabContextMenu();
+  closeFindBar();
   try {
     if (tabId === state.browser?.tabId) {
       await API.focusBrowser();
@@ -2416,6 +3599,26 @@ async function duplicateActiveTab() {
     showToast(error.message || '再开网页失败');
   } finally {
     el.duplicateTab.disabled = !state.activeService;
+  }
+}
+
+async function openAddressInNewTab() {
+  const address = el.addressInput.value.trim();
+  if (!address) {
+    el.addressInput.setAttribute('aria-invalid', 'true');
+    showToast('请输入网址');
+    return;
+  }
+  if (!state.activeService) {
+    await navigateToAddress();
+    return;
+  }
+  try {
+    // 复制当前平台再导航：新标签沿用同一登录分区，原网页保持不动
+    await API.openTab(state.activeService, state.mode);
+    await navigateToAddress();
+  } catch (error) {
+    showToast(error.message || '新标签打开失败');
   }
 }
 
@@ -2695,6 +3898,8 @@ function bindEvents() {
   el.restoreAllPlatforms.addEventListener('click', restoreAllPlatforms);
   el.duplicateTab.addEventListener('click', duplicateActiveTab);
   el.clearBrowserTabs.addEventListener('click', clearBrowserTabs);
+  // 「全部网页」弹层：约定 ID 缺失（creator.html 未就位）时内部自动停用
+  wireAllTabs();
   // 标签条滚轮横向滚动：鼠标滚轮纵向增量转成横向滚动（触屏横向平移与 shift+滚轮走原生 deltaX，不受影响），
   // 解决网页标签超过一屏后，鼠标用户无法移动到右侧标签的问题。
   el.platformTabs.addEventListener('wheel', event => {
@@ -2703,6 +3908,83 @@ function bindEvents() {
     event.preventDefault();
     el.platformTabs.scrollLeft += event.deltaY;
   }, { passive: false });
+  // —— 指针拖拽的全局接管 ——
+  // move：未超阈值前只记录位置；超过阈值激活拖拽（拖影+压暗+自动横滚）并实时更新放置计划；
+  // up：激活过＝提交重排并抑制紧随其后的 click（防止拖完误切标签），没激活＝普通点击放行。
+  window.addEventListener('pointermove', event => {
+    if (!tabDrag) return;
+    tabDrag.lastX = event.clientX;
+    tabDrag.lastY = event.clientY;
+    if (!tabDrag.active) {
+      if (Math.hypot(event.clientX - tabDrag.startX, event.clientY - tabDrag.startY) < TAB_DRAG_THRESHOLD) return;
+      if (typeof API?.reorderTabs !== 'function') {
+        tabDrag = null;
+        showToast('桌面程序版本过旧：请 ⌘Q 完全退出后重新打开，再使用拖动排序');
+        return;
+      }
+      activateTabDrag();
+    }
+    moveTabDragGhost(event.clientX, event.clientY);
+    updateTabDragPlan(event.clientX, event.clientY);
+  });
+  window.addEventListener('pointerup', event => {
+    if (!tabDrag || event.pointerId !== tabDrag.pointerId) return;
+    if (tabDrag.active) {
+      endTabDrag({ commit: true });
+      tabClickSuppressed = true;
+    } else {
+      // 未达阈值＝点击意图。激活必须放在 pointerup：标签栏重渲染（SSE 状态推送、
+      // 拖拽提交后的异步刷新）若恰好落在按下与抬起之间，按下节点被替换，click
+      // 事件会整个丢失，表现为点了标签却没切换。置抑制标志吞掉紧随的 click，
+      // 避免按钮监听再触发一次 selectTab。
+      const sourceId = tabDrag.sourceId;
+      tabDrag = null;
+      tabClickSuppressed = true;
+      selectTab(sourceId);
+    }
+  });
+  window.addEventListener('pointercancel', event => {
+    if (tabDrag && event.pointerId === tabDrag.pointerId) endTabDrag({ commit: false });
+  });
+  // 分类手柄拖拽排序：window 级接管移动/松手/取消，与标签拖拽同一套接线习惯；
+  // 只响应发起拖拽的那颗指针，第二触点／触控板光标不会干扰排序
+  window.addEventListener('pointermove', event => {
+    if (!folderGripDrag || event.pointerId !== folderGripDrag.pointerId) return;
+    folderGripDrag.lastX = event.clientX;
+    folderGripDrag.lastY = event.clientY;
+    if (!folderGripDrag.active) {
+      if (Math.hypot(event.clientX - folderGripDrag.startX, event.clientY - folderGripDrag.startY) < QUICK_FOLDER_DRAG_THRESHOLD) return;
+      activateQuickFolderDrag();
+    }
+    event.preventDefault();
+    updateQuickFolderDropPlan(event.clientY);
+  });
+  window.addEventListener('pointerup', event => {
+    if (!folderGripDrag || event.pointerId !== folderGripDrag.pointerId) return;
+    folderGripDrag.lastX = event.clientX;
+    folderGripDrag.lastY = event.clientY;
+    if (folderGripDrag.active) updateQuickFolderDropPlan(event.clientY);
+    endQuickFolderGripDrag({ commit: folderGripDrag.active });
+  });
+  window.addEventListener('pointercancel', event => {
+    if (folderGripDrag && event.pointerId === folderGripDrag.pointerId) endQuickFolderGripDrag({ commit: false });
+  });
+  window.addEventListener('keydown', event => {
+    if (folderGripDrag?.active && event.key === 'Escape') {
+      event.preventDefault();
+      endQuickFolderGripDrag({ commit: false });
+    }
+  });
+  // 拖拽激活后的第一颗 click 必须吞掉：拖完松手落点还在标签上，否则会误切走。
+  // 每次新的 pointerdown 都重置抑制标志：若上一轮松手没产生 click（如丢到窗口外），
+  // 标志不会误吞下一轮的真实点击。
+  window.addEventListener('pointerdown', () => { tabClickSuppressed = false; }, true);
+  el.platformTabs.addEventListener('click', event => {
+    if (!tabClickSuppressed) return;
+    tabClickSuppressed = false;
+    event.stopPropagation();
+    event.preventDefault();
+  }, true);
   el.platformForm.addEventListener('keydown', event => {
     if (event.key !== 'Escape') return;
     event.preventDefault();
@@ -2787,6 +4069,13 @@ function bindEvents() {
         : '剪映悬浮窗已关闭');
     } catch (error) { showToast(error.message || '悬浮窗开启失败'); }
   });
+  // 右键浮出提示：仅在桌面程序具备浮出能力时注入，常驻工具行尾部，不占卡片空间。
+  if (typeof API.floatVideoAsset === 'function') {
+    const floatHint = document.createElement('span');
+    floatHint.className = 'quick-float-hint';
+    floatHint.textContent = '右键视频卡浮出小窗';
+    document.querySelector('.asset-quick-actions')?.appendChild(floatHint);
+  }
   el.quickMultiSelect.addEventListener('click', () => setQuickSelectMode(!state.quickSelectMode));
   el.quickSelClear.addEventListener('click', () => {
     state.quickSelectionOrder.length = 0;
@@ -2843,6 +4132,12 @@ function bindEvents() {
   });
   el.addressInput.addEventListener('input', () => el.addressInput.setAttribute('aria-invalid', 'false'));
   el.addressInput.addEventListener('keydown', event => {
+    // Alt+Enter（对标浏览器）：地址在新标签打开，不再覆盖当前网页
+    if (event.key === 'Enter' && event.altKey) {
+      event.preventDefault();
+      openAddressInNewTab();
+      return;
+    }
     if (event.key !== 'Escape') return;
     const service = serviceById(state.activeService);
     el.addressInput.value = state.browser?.url || service?.url || '';
@@ -2899,15 +4194,73 @@ function bindEvents() {
   window.addEventListener('resize', queueBoundsUpdate);
   window.addEventListener('beforeunload', () => saveWorkspace(true));
   API.onBrowserState(applyBrowserState);
+  // 主进程发来的轻提示（撤销关闭结果等），宿主页与平台页两条快捷键路径共用
+  if (typeof API.onNotice === 'function') API.onNotice(text => showToast(text));
+  // 页内查找：平台页聚焦时 Cmd/Ctrl+F 由主进程转发；查找条控件与匹配计数在这里
+  if (typeof API.onShowFindBar === 'function') API.onShowFindBar(() => showFindBar());
+  if (typeof API.onFindResult === 'function') API.onFindResult(applyFindResult);
+  if (typeof API.onFocusAddress === 'function') {
+    API.onFocusAddress(() => {
+      el.addressInput.focus();
+      el.addressInput.select();
+    });
+  }
+  el.findInput.addEventListener('input', () => runFind(false, false));
+  el.findInput.addEventListener('keydown', event => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      runFind(!event.shiftKey, true);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      closeFindBar();
+    }
+  });
+  el.findPrev.addEventListener('click', () => runFind(false, true));
+  el.findNext.addEventListener('click', () => runFind(true, true));
+  el.findClose.addEventListener('click', closeFindBar);
+  // 标签右键菜单：点击菜单外或窗口失焦即关闭；Esc 仅在菜单打开时负责关闭它
+  document.addEventListener('pointerdown', event => {
+    if (!el.tabContextMenu.hidden && !event.target.closest('#tabContextMenu')) closeTabContextMenu();
+  });
+  el.tabContextMenu.addEventListener('keydown', event => {
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    const items = [...el.tabContextMenu.querySelectorAll('.tab-context-item:not(:disabled)')];
+    if (!items.length) return;
+    event.preventDefault();
+    const index = items.indexOf(document.activeElement);
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
+      : (index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+    items[next].focus();
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return;
+    // 拖拽中 Esc＝取消拖动，顺序不变
+    if (tabDrag?.active) {
+      event.preventDefault();
+      endTabDrag({ commit: false });
+      showToast('已取消拖动，顺序未改变');
+      return;
+    }
+    if (!el.tabContextMenu.hidden) {
+      event.preventDefault();
+      closeTabContextMenu();
+    }
+  });
+  window.addEventListener('blur', closeTabContextMenu);
   API.onAssetDragResult?.(result => {
     document.querySelectorAll('.asset-card-wrap.asset-dragging').forEach(card => card.classList.remove('asset-dragging'));
     if (!result?.ok) showToast(result?.error || '文件拖拽失败，请重试');
   });
+  // 视频浮出小窗关闭事件回流：撤掉「已浮出」角标并恢复原卡（路径可能以任一登记形态回传）。
+  if (typeof API.onFloatVideoClosed === 'function') {
+    API.onFloatVideoClosed(handleFloatVideoClosed);
+  }
   API.onDownload(download => {
     state.downloads.set(download.id, download);
     renderDownloads();
     if (download.state === 'completed' && !state.archiveNotified.has(download.id)) {
       state.archiveNotified.add(download.id);
+      loadAssetItems().catch(() => {});
       loadProduction(true).then(() => {
         renderDownloads();
       }).catch(() => {});
@@ -2950,9 +4303,37 @@ function bindEvents() {
       importDownloadedFiles();
       return;
     }
+    // 强制刷新（对标浏览器 Shift+刷新）：忽略缓存重新加载平台页
+    if (lower === 'r' && event.shiftKey) {
+      event.preventDefault();
+      API.navigate('hard-reload').catch(error => showToast(error.message));
+      return;
+    }
     if (lower === 'r') {
       event.preventDefault();
       API.navigate('reload').catch(error => showToast(error.message));
+      return;
+    }
+    // 撤销关闭标签（对标浏览器 Ctrl/⌘+Shift+T）：主进程最近关闭栈按时间恢复
+    if (lower === 't' && event.shiftKey) {
+      event.preventDefault();
+      if (typeof API.restoreClosedTab === 'function') API.restoreClosedTab().catch(error => showToast(error.message));
+      return;
+    }
+    // Ctrl/⌘+Tab 循环切换标签（正着走，加 Shift 反着走）
+    if (event.key === 'Tab') {
+      event.preventDefault();
+      const ids = tabsWithIndexes(visibleTabs()).map(tab => tab.id);
+      if (ids.length < 2) return;
+      const index = ids.indexOf(state.browser?.tabId);
+      const nextId = ids[(index + (event.shiftKey ? -1 : 1) + ids.length) % ids.length];
+      selectTab(nextId);
+      return;
+    }
+    // 页内查找（对标浏览器 Ctrl/⌘+F）；Shift 组合键留给页面自身的快捷键
+    if (lower === 'f' && !event.shiftKey) {
+      event.preventDefault();
+      showFindBar();
       return;
     }
     if (lower === 'l') {
@@ -2995,6 +4376,10 @@ function bindEvents() {
   // 接收主窗口 Agent 经验库推送的模板（同源 localStorage）
   window.addEventListener('storage', event => {
     if (event.key === 'vos.pendingPrompt' && event.newValue) applyPendingPrompt().catch(() => {});
+    if (event.key === assetFolderOrderStorageKey()) {
+      assetFolderOrderCache = { projectId: null, data: {} };
+      renderQuickFolderTree();
+    }
   });
 }
 

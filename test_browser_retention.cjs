@@ -133,7 +133,7 @@ function createController(filePath) {
     activeTabId: null, tabSequence: 0, browserBounds: { x: 410, y: 112, width: 900, height: 700 },
     assetPanelState: { open: false, layout: 'overlay', width: 520 },
     browserTabs: new Map(), lastModeTabs: { image: null, video: null }, downloadOwners: new WeakMap(),
-    activeDownloadItems: new Map(), initializedModes: { image: false, video: false, ...initial?.initializedModes },
+    closedTabHistory: [], activeDownloadItems: new Map(), initializedModes: { image: false, video: false, ...initial?.initializedModes },
     restoringBrowserSession: false, closingWorkspace: false, browserSessionRestored: false, lastBrowserSnapshot: '',
     browserSessionStore: {
       load: () => store.load(),

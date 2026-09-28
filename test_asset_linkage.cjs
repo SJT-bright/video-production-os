@@ -139,12 +139,16 @@ async function checkBackend() {
 
 async function checkRendererTransitions() {
   const source = fs.readFileSync(path.join(__dirname, 'creator-assets.js'), 'utf8');
-  const definitions = source.slice(source.indexOf('let reloadTimer = null;'), source.indexOf('function showToast('));
+  const definitions = [
+    source.slice(source.indexOf('let reloadTimer = null;'), source.indexOf('function viewKey()')),
+    source.slice(source.indexOf('function adoptProject('), source.indexOf('function showToast(')),
+  ].join('\n');
   const a = { id: 'a', folder: '甲', name: '甲' }, b = { id: 'b', folder: '乙', name: '乙' };
   const timers = new Map(); let next = 0, refreshes = 0;
   const context = { state: { config: { project: a }, knownFolders: new Set(), collapsedFolders: new Set() },
-    el: { previewDialog: { open: false }, folderTree: { replaceChildren() {} }, assetGrid: { replaceChildren() {} }, librarySummary: {} },
-    window: {}, setTimeout: callback => { timers.set(++next, callback); return next; }, clearTimeout: id => timers.delete(id),
+    el: { previewDialog: { open: false }, folderTree: { replaceChildren() {}, addEventListener() {} }, assetGrid: { replaceChildren() {}, addEventListener() {} }, librarySummary: {} },
+    window: {}, saveAssetView() {}, restoreAssetView() {},
+    setTimeout: callback => { timers.set(++next, callback); return next; }, clearTimeout: id => timers.delete(id),
     API: { getConfig: async () => ({ project: b }) }, loadLibrary: async () => { refreshes++; }, showToast: message => { throw Error(message); } };
   vm.createContext(context); vm.runInContext(definitions, context);
   context.scheduleLibraryReload(true); context.scheduleLibraryReload(false);

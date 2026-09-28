@@ -20,37 +20,42 @@ FORM: 现有桌面工作台的 Operate 模式扩展；高密度、标准控件�
 <body data-mode="image" data-ready="loading">
   <div class="creator-shell">
     <header class="creator-header">
-      <div class="creator-brand">
-        <span class="creator-mark" data-ui-icon="studio" aria-hidden="true"></span>
-        <strong>创作浏览器</strong>
+      <!-- 第一排：品牌、创作模式、当前剧本与功能按钮（「清空网页」自标签排移入功能区） -->
+      <div class="creator-header-top">
+        <div class="creator-brand">
+          <span class="creator-mark" data-ui-icon="studio" aria-hidden="true"></span>
+          <strong>创作浏览器</strong>
+        </div>
+
+        <div class="mode-switch" role="group" aria-label="创作模式">
+          <button class="mode-button" data-mode="image" aria-pressed="true">
+            <span data-ui-icon="image" aria-hidden="true"></span>
+            图片模式
+          </button>
+          <button class="mode-button" data-mode="video" aria-pressed="false">
+            <span data-ui-icon="video" aria-hidden="true"></span>
+            视频模式
+          </button>
+        </div>
+
+        <div class="header-actions">
+          <span class="download-badge hidden" id="downloadBadge" role="status">⬇ 正在下载 0 项</span>
+          <button class="project-chip" id="currentProject" type="button" title="切换剧本" aria-label="切换当前剧本" aria-haspopup="menu" aria-expanded="false">当前剧本</button>
+          <button class="asset-toggle" id="toggleAssets" type="button" aria-pressed="true" title="打开或关闭创作资产库">
+            <span data-ui-icon="library" aria-hidden="true"></span>
+            创作资产
+          </button>
+          <button class="icon-button" id="togglePrompt" title="收起或展开创作材料栏" aria-label="收起或展开创作材料栏" aria-controls="promptPanel" aria-expanded="true">◧</button>
+          <button class="quiet-button clear-browser-tabs" id="clearBrowserTabs" type="button" title="关闭图片和视频模式的全部网页，保留网站登录和素材">清空网页</button>
+          <button class="quiet-button" id="showMainWindow">返回制作 OS</button>
+        </div>
       </div>
 
-      <div class="mode-switch" role="group" aria-label="创作模式">
-        <button class="mode-button" data-mode="image" aria-pressed="true">
-          <span data-ui-icon="image" aria-hidden="true"></span>
-          图片模式
-        </button>
-        <button class="mode-button" data-mode="video" aria-pressed="false">
-          <span data-ui-icon="video" aria-hidden="true"></span>
-          视频模式
-        </button>
-      </div>
-
+      <!-- 第二排：网页标签独占整行宽度，右侧固定「＋」与「全部网页」入口 -->
       <div class="platform-strip">
         <nav class="platform-tabs" id="platformTabs" aria-label="已打开的创作网页"></nav>
         <button class="platform-add" id="addPlatform" type="button" aria-label="再开或打开创作网站" aria-expanded="false" aria-controls="platformPopover" title="再开一个网页／打开其他网站">＋</button>
-        <button class="quiet-button clear-browser-tabs" id="clearBrowserTabs" type="button" title="关闭图片和视频模式的全部网页，保留网站登录和素材">清空网页</button>
-      </div>
-
-      <div class="header-actions">
-        <span class="download-badge hidden" id="downloadBadge" role="status">⬇ 正在下载 0 项</span>
-        <button class="project-chip" id="currentProject" type="button" title="切换剧本" aria-label="切换当前剧本" aria-haspopup="menu" aria-expanded="false">当前剧本</button>
-        <button class="asset-toggle" id="toggleAssets" type="button" aria-pressed="true" title="打开或关闭创作资产库">
-          <span data-ui-icon="library" aria-hidden="true"></span>
-          创作资产
-        </button>
-        <button class="icon-button" id="togglePrompt" title="收起或展开创作材料栏" aria-label="收起或展开创作材料栏" aria-controls="promptPanel" aria-expanded="true">◧</button>
-        <button class="quiet-button" id="showMainWindow">返回制作 OS</button>
+        <button class="quiet-button all-tabs-button" id="allTabsButton" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="allTabsPopover" title="搜索并切换当前模式已打开的网页">全部网页</button>
       </div>
 
       <div class="platform-popover hidden" id="platformPopover">
@@ -75,6 +80,13 @@ FORM: 现有桌面工作台的 Operate 模式扩展；高密度、标准控件�
           <div class="hidden-platform-list" id="hiddenPlatformList"></div>
         </section>
       </div>
+
+      <!-- 「全部网页」弹层：绝对定位覆盖在两排头部之下，不占常驻行高；
+           显隐与列表渲染由 creator.js 按 allTabs* ID 契约接管，列表项类名 all-tabs-item / all-tabs-name / all-tabs-platform / all-tabs-empty -->
+      <div class="all-tabs-popover hidden" id="allTabsPopover" role="dialog" aria-label="全部网页">
+        <input class="all-tabs-search" id="allTabsSearch" type="text" autocomplete="off" spellcheck="false" aria-label="按名称或平台搜索已打开的网页" placeholder="搜索网页名称或平台…">
+        <div class="all-tabs-list" id="allTabsList" role="listbox" aria-label="全部网页"></div>
+      </div>
     </header>
 
     <main class="creator-workspace">
@@ -96,11 +108,13 @@ FORM: 现有桌面工作台的 Operate 模式扩展；高密度、标准控件�
           <div class="accordion-body">
             <div class="prompt-editor-head">
               <strong id="promptModeLabel">图片提示词</strong>
-              <span class="character-count" id="characterCount">0 字</span>
+              <span class="prompt-editor-head-tools">
+                <span class="character-count" id="characterCount">0 字</span>
+                <button class="text-action" id="copyPrompt" type="button" title="复制提示词；⌘Enter = 复制并切到网页">复制</button>
+              </span>
             </div>
             <textarea id="promptEditor" spellcheck="false" aria-label="当前模式提示词" placeholder="粘贴或输入提示词…"></textarea>
             <div class="prompt-actions">
-              <button class="text-action" id="copyPrompt" type="button" title="复制提示词；⌘Enter = 复制并切到网页">复制</button>
               <button class="text-action" id="clearPrompt" type="button">清空</button>
               <button class="text-action template-create-toggle" id="templateCreate" type="button">＋ 新建固定提示词</button>
             </div>
@@ -139,12 +153,12 @@ FORM: 现有桌面工作台的 Operate 模式扩展；高密度、标准控件�
           </summary>
           <div class="accordion-body">
             <div class="asset-quick-actions">
-              <button class="primary-action" id="importLocalAssets" type="button">＋ 添加本地素材</button>
-              <button class="secondary-action" id="openAssetLibrary" type="button">打开完整资产库</button>
+              <button class="primary-action" id="importLocalAssets" type="button" title="添加本地素材">＋ 素材</button>
+              <button class="secondary-action" id="openAssetLibrary" type="button" title="打开完整资产库">资产库</button>
               <button class="secondary-action" id="toggleDragTray" type="button" title="置顶迷你拖拽窗：拖资产进剪映；Alt+Shift+D 随时开关">剪映联动</button>
+              <button class="secondary-action multi-toggle" id="quickMultiSelect" type="button" aria-pressed="false" title="框选模式：点卡片选入，或按住拖动画框">框选：关</button>
             </div>
             <div class="asset-quick-tools" id="quickTools" hidden>
-              <button class="secondary-action multi-toggle" id="quickMultiSelect" type="button" aria-pressed="false">框选模式：关</button>
               <span class="quick-sel-info" id="quickSelInfo" aria-live="polite"></span>
               <button class="text-action" id="quickSelClear" type="button" hidden>清空选择</button>
             </div>
@@ -154,6 +168,21 @@ FORM: 现有桌面工作台的 Operate 模式扩展；高密度、标准控件�
               <small id="quickDropTarget">当前存入：全部资产（按类别自动归档）</small>
             </div>
             <nav class="quick-folder-tree" id="quickFolderTree" aria-label="资产分类文件夹"></nav>
+            <section class="browser-download-dock" id="browserDownloadDock" aria-label="浏览器下载">
+              <div class="quick-folder-row">
+                <button class="quick-folder-chevron-wrap expanded" id="browserDownloadToggle" type="button" aria-expanded="true" aria-label="收起浏览器下载">
+                  <span class="folder-chevron" aria-hidden="true"></span>
+                </button>
+                <button class="quick-folder-name" id="browserDownloadName" type="button" aria-expanded="true">浏览器下载</button>
+                <span class="quick-folder-count" id="browserDownloadCount">0</span>
+              </div>
+              <div class="quick-children" id="browserDownloadChildren">
+                <div class="quick-children-inner">
+                  <div class="browser-download-nav" id="browserDownloadNav" aria-label="下载文件夹" hidden></div>
+                  <div class="quick-file-grid browser-download-grid" id="browserDownloadGrid" data-browser-download-grid="1"></div>
+                </div>
+              </div>
+            </section>
             <input id="quickFileInput" type="file" multiple hidden accept="image/*,video/*,audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg,.opus,.wma,.aiff,.aif,.amr,.ape">
 
             <section class="downloads-section" aria-labelledby="downloadsHeading">
@@ -194,6 +223,13 @@ FORM: 现有桌面工作台的 Operate 模式扩展；高密度、标准控件�
             >
             <button class="address-go" id="addressGo" type="submit">前往</button>
           </form>
+          <div class="find-bar" id="findBar" hidden>
+            <input class="find-input" id="findInput" type="text" placeholder="在页面中查找" aria-label="在页面中查找">
+            <span class="find-count" id="findCount" role="status" aria-live="polite"></span>
+            <button class="icon-button" id="findPrev" type="button" title="上一个（Shift+Enter）" aria-label="上一个匹配">↑</button>
+            <button class="icon-button" id="findNext" type="button" title="下一个（Enter）" aria-label="下一个匹配">↓</button>
+            <button class="icon-button" id="findClose" type="button" title="关闭查找（Esc）" aria-label="关闭查找">×</button>
+          </div>
           <div class="browser-toolbar-actions">
             <button class="quiet-button" id="creatorWorkflowOpen" type="button">制作流程</button>
             <button class="quiet-button" id="importDownloadedFiles" type="button" aria-label="导入下载的文件并归档" title="选择刚从系统浏览器下载的文件并归档">导入文件</button>
@@ -276,6 +312,10 @@ FORM: 现有桌面工作台的 Operate 模式扩展；高密度、标准控件�
       </footer>
     </div>
   </dialog>
+
+  <!-- 标签右键菜单挂在 body 末尾：header 的 backdrop-filter 会把 fixed 后代困在自己的
+       stacking context 里，被后绘制的工作区盖住；根层级下 fixed + z-index 才能浮在全部内容之上 -->
+  <div class="tab-context-menu" id="tabContextMenu" role="menu" aria-label="网页标签操作" hidden></div>
 
   <script src="assets/ui/creator/ui-icons.js"></script>
 <script src="creator.js"></script>

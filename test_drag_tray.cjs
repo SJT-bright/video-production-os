@@ -138,6 +138,29 @@ async function run() {
   // 提示词伴生文件是媒体元数据：既不计数也不出现在任何资产列表
   fs.writeFileSync(path.join(projectRoot, '创作资产库', '测试剧本', '生成视频-029.prompt.txt'), '生成来源｜测试');
 
+  // 期望顺序按应用内 newestFirst 规则动态计算（生成日期降序 → mtime 降序 → 名称 zh-CN numeric 降序），
+  // 规则变更时只需同步此函数，不再手工维护硬编码顺序。
+  const badgeDateFor = rel => {
+    const dirPart = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/') + 1) : '';
+    const m = dirPart.match(/(\d{4})-(\d{2})-(\d{2})/);
+    if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+    const stat = fs.statSync(path.join(projectRoot, '创作资产库', ...rel.split('/')));
+    const local = new Date(stat.mtime);
+    return `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, '0')}-${String(local.getDate()).padStart(2, '0')}`;
+  };
+  const VIDEO_ORDER_FIXTURES = [
+    '测试剧本/生成视频/2026-01-02/生成视频-050.mp4',
+    '测试剧本/测试片段甲.mp4',
+    '测试剧本/生成视频-029.mp4',
+    '测试剧本/生成视频-030.mp4',
+    '测试剧本/final_v2.mp4',
+  ];
+  const expectedVideoOrder = VIDEO_ORDER_FIXTURES
+    .map(rel => ({ rel, date: badgeDateFor(rel), mtime: fs.statSync(path.join(projectRoot, '创作资产库', ...rel.split('/'))).mtimeMs }))
+    .sort((a, b) => b.date.localeCompare(a.date) || b.mtime - a.mtime
+      || b.rel.localeCompare(a.rel, 'zh-CN', { numeric: true }))
+    .map(item => item.rel);
+
   const app = await electron.launch({
     args: [__dirname], timeout: 60000,
     env: {
@@ -334,9 +357,7 @@ async function run() {
     // [生成视频-050（日期文件夹内）、测试片段甲、生成视频-029、生成视频-030、final_v2]，
     // 依次点击 first / nth(1) → 选中 [生成视频-050, 测试片段甲]。
     results.selectModeBatchVisible = selectResult.batchVisible === true;
-    results.selectOrderMarked = JSON.stringify(selectResult.selection) === JSON.stringify([
-      '测试剧本/生成视频/2026-01-02/生成视频-050.mp4', '测试剧本/测试片段甲.mp4',
-    ]);
+    results.selectOrderMarked = JSON.stringify(selectResult.selection) === JSON.stringify(expectedVideoOrder.slice(0, 2));
     // 修复锚点：选择模式下卡片必须仍 draggable=true——若随多选关闭 draggable，
     // 真实鼠标拖拽不会发起 dragstart，「拖任一选中卡整批拖出」不可达（HTML 规范行为）。
     results.selectModeStillDraggable = selectResult.allCardsDraggable === true;
@@ -373,9 +394,9 @@ async function run() {
       selection: window.__trayDebug().selection,
     }));
     results.batchDragChainOk = batchDrag.results.some(r => r?.ok === true && r?.count === 2
-      && r?.path === '测试剧本/生成视频/2026-01-02/生成视频-050.mp4');
+      && r?.path === expectedVideoOrder[0]);
     results.batchSelectionKeptAfterDrag = JSON.stringify(batchDrag.selection)
-      === JSON.stringify(['测试剧本/生成视频/2026-01-02/生成视频-050.mp4', '测试剧本/测试片段甲.mp4']);
+      === JSON.stringify(expectedVideoOrder.slice(0, 2));
     if (!results.batchDragChainOk || !results.batchSelectionKeptAfterDrag) {
       console.log('BATCH-DRAG-DIAG', JSON.stringify(batchDrag));
     }
@@ -385,14 +406,15 @@ async function run() {
       (document.querySelector('#trayBatch .tray-batch-hint')?.textContent || '').includes('已选 2 项'));
 
     // 选择模式下拖「未选中」的卡 = 只拖该卡本身（count 1），不得误发整批
-    await trayPage.evaluate(() => new Promise((resolve, reject) => {
+    const unselectedTarget = expectedVideoOrder[2];
+    await trayPage.evaluate(targetPath => new Promise((resolve, reject) => {
       window.__dragResults.length = 0;
       let tries = 0;
       const attempt = () => {
-        const target = [...document.querySelectorAll('.tray-card')]
-          .find(card => card.dataset.path === '测试剧本/生成视频-029.mp4');
-        if (target && !target.classList.contains('selected')) {
-          target.dispatchEvent(new DragEvent('dragstart', { bubbles: true }));
+        const card = [...document.querySelectorAll('.tray-card')]
+          .find(candidate => candidate.dataset.path === targetPath);
+        if (card && !card.classList.contains('selected')) {
+          card.dispatchEvent(new DragEvent('dragstart', { bubbles: true }));
           resolve(true);
           return;
         }
@@ -400,12 +422,12 @@ async function run() {
         setTimeout(attempt, 100);
       };
       attempt();
-    }));
+    }), unselectedTarget);
     await trayPage.waitForFunction(() => (window.__dragResults || []).length > 0, null, { timeout: 15000 });
-    results.unselectedDragSingleOk = await trayPage.evaluate(() => {
+    results.unselectedDragSingleOk = await trayPage.evaluate(targetPath => {
       const r = (window.__dragResults || [])[0];
-      return r?.ok === true && r?.count === 1 && r?.path === '测试剧本/生成视频-029.mp4';
-    });
+      return r?.ok === true && r?.count === 1 && r?.path === targetPath;
+    }, unselectedTarget);
 
     // —— 乱序守卫（屏障式）：A→B→A→B 回环，旧响应后完成不得覆盖新渲染 ——
     // route 按请求到达顺序挂起（屏障），测试显式按“新请求先释放、旧请求后释放”的逆序放行。
@@ -483,6 +505,26 @@ async function run() {
       console.log('STALE-DIAG', JSON.stringify({ heldProjects, staleState }));
     }
 
+    // —— 项目切换跟随用例：切换后悬浮窗必须重载到新项目，不得卡在旧项目列表 ——
+    // 回归锚点：旧版守卫 `activeProjectId() !== newProjectId` 用旧项目 ID 对比新项目 ID，
+    // 项目一切换渲染就自弃，悬浮窗永久卡在旧项目，之后每次拖拽都被主进程以
+    // 「资产不属于当前剧本」拒绝（真实鼠标端到端复现于 2026-09-27）。
+    await post(trayPort, '/api/creative-projects', { action: 'activate', id: projectB.id });
+    let switchFollowed = false;
+    for (let i = 0; i < 25 && !switchFollowed; i++) {
+      await new Promise(r => setTimeout(r, 200));
+      const after = await trayPage.evaluate(`({
+        projectId: window.__trayProjectId,
+        label: document.getElementById('trayProject')?.textContent || '',
+        status: document.getElementById('trayStatus')?.textContent || '',
+      })`);
+      switchFollowed = after.projectId === projectB.id && after.label.includes(projectB.folder);
+    }
+    results.trayFollowsProjectSwitch = switchFollowed;
+    // 切回 A，保持后续用例环境不变
+    await post(trayPort, '/api/creative-projects', { action: 'activate', id: projectIdA });
+    await new Promise(r => setTimeout(r, 900));
+
     // 窗口拖拽兜底：合成指针事件走 JS 路径（原生 app-region 只拦截真实输入，不影响合成事件），
     // 断言窗口按位移移动且位置记忆落盘
     const boundsFile = path.join(runRoot, 'data', 'drag-tray-bounds.json');
@@ -531,7 +573,18 @@ async function run() {
     console.error('DRAG_TRAY_FAIL', error.message || error);
     process.exitCode = 1;
   } finally {
-    await app.close().catch(() => {});
+    // 断言通过后仍要给原生窗口一个有界的退出时间，避免 Playwright 清理挂起拖住整批回归。
+    let closeTimer;
+    try {
+      await Promise.race([
+        app.close(),
+        new Promise((_, reject) => { closeTimer = setTimeout(() => reject(new Error('Electron 关闭超时')), 8000); }),
+      ]);
+    } catch {
+      app.process()?.kill('SIGKILL');
+    } finally {
+      clearTimeout(closeTimer);
+    }
     if (!failed) { try { fs.rmSync(runRoot, { recursive: true, force: true, maxRetries: 5 }); } catch {} }
     else console.log(`DEBUG-RUNROOT-KEPT(测试失败，保留现场): ${runRoot}`);
   }

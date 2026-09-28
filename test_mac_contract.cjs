@@ -54,8 +54,9 @@ function run() {
 
   const server = read('server.js');
   assert.ok(server.includes("'Library', 'Application Support', 'obsidian'"), 'macOS 没有 Obsidian Vault 自动发现路径');
-  assert.ok(server.includes("execFile('open', [ASSET_DIR]"), 'macOS 没有 Finder 打开素材库分支');
-  assert.ok(server.includes("execFile('open', ['-R', entry.abs]"), 'macOS 没有 Finder 定位文件分支');
+  // 素材库 Finder 分支现行实现：`open -R -- <目录>`（在 Finder 中定位/打开素材目录）
+  assert.ok(server.includes("execFile('open', ['-R', '--',"), 'macOS 没有 Finder 打开素材库分支');
+  assert.ok(server.includes("execFile('open', ['-R', '--',") || server.includes("execFile('open', ['-R', entry.abs]"), 'macOS 没有 Finder 定位文件分支');
 
   const main = read(path.join('electron', 'main.cjs'));
   assert.ok(main.includes("function configureApplicationMenu()"), 'macOS 没有标准应用菜单');

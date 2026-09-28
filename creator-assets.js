@@ -131,9 +131,53 @@ let resizeFrame = null;
 let reloadTimer = null;
 let libraryRequestId = 0;
 let projectRefreshNeeded = false;
+let pendingView = null;
+let viewSaveTimer = null;
+function viewKey() { return `videoOS.assetView.v1.${SURFACE_MODE}.${activeProjectId()}`; }
+function saveAssetView() {
+  if (!state.tree || pendingView) return;
+  try {
+    localStorage.setItem(viewKey(), JSON.stringify({
+      folder: state.selectedFolder, query: state.query, filter: state.filter, sort: state.sort,
+      collapsed: [...state.collapsedFolders], known: [...state.knownFolders],
+      limit: state.renderLimit, scroll: el.assetGrid.scrollTop, treeScroll: el.folderTree.scrollTop,
+    }));
+  } catch {}
+}
+function restoreAssetView() {
+  state.query = ''; state.filter = 'all'; state.sort = 'recent'; state.audioKind = '';
+  state.renderLimit = RENDER_BATCH;
+  pendingView = null;
+  try {
+    const saved = JSON.parse(localStorage.getItem(viewKey()) || 'null');
+    if (saved && typeof saved === 'object') {
+      pendingView = saved;
+      state.selectedFolder = typeof saved.folder === 'string' ? saved.folder : '';
+      state.query = typeof saved.query === 'string' ? saved.query : '';
+      if (saved.filter === 'all' || TYPE_COPY[saved.filter]) state.filter = saved.filter;
+      if ([...el.assetSort.options].some(option => option.value === saved.sort)) state.sort = saved.sort;
+      state.collapsedFolders = new Set(Array.isArray(saved.collapsed) ? saved.collapsed : []);
+      state.knownFolders = new Set(Array.isArray(saved.known) ? saved.known : []);
+      state.renderLimit = Math.max(RENDER_BATCH, Math.min(10000, Number(saved.limit) || RENDER_BATCH));
+    }
+  } catch {}
+  el.assetSearch.value = state.query;
+  el.clearSearch.hidden = !state.query;
+  el.assetSort.value = state.sort;
+  document.querySelectorAll('[data-filter]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.filter === state.filter)));
+}
+function scheduleViewSave() {
+  clearTimeout(viewSaveTimer);
+  viewSaveTimer = setTimeout(saveAssetView, 180);
+}
+window.addEventListener('pagehide', saveAssetView);
+document.addEventListener('click', scheduleViewSave);
+el.assetGrid.addEventListener('scroll', scheduleViewSave, { passive: true });
+el.folderTree.addEventListener('scroll', scheduleViewSave, { passive: true });
 
 function adoptProject(project) {
   if (!project || project.id === state.config?.project?.id) return;
+  saveAssetView();
   libraryRequestId++;
   if (el.previewDialog.open) closePreviewNow();
   window.AssetSources?.close();
@@ -144,6 +188,7 @@ function adoptProject(project) {
   state.tree = null;
   state.knownFolders.clear();
   state.collapsedFolders.clear();
+  restoreAssetView();
   el.folderTree.replaceChildren();
   el.assetGrid.replaceChildren();
   el.librarySummary.textContent = `${project.name} · 正在读取…`;
@@ -183,6 +228,139 @@ function folderLabel(folderPath) {
   if (!folderPath) return '创作资产库';
   return folderPath.split('/').filter(Boolean).at(-1) || '创作资产库';
 }
+
+// 与创作浏览器左侧分类树共用顺序；这里只改变展示，不移动磁盘文件。
+const FOLDER_ORDER_PREFIX = 'videoOS.assetFolderOrder.v1.';
+function folderOrderKey() { return `${FOLDER_ORDER_PREFIX}${activeProjectId()}`; }
+function readFolderOrder() {
+  try {
+    const value = JSON.parse(localStorage.getItem(folderOrderKey()) || '{}');
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  } catch { return {}; }
+}
+function orderFolderSiblings(folders, parentPath) {
+  const saved = readFolderOrder()[parentPath];
+  if (!Array.isArray(saved) || folders.length < 2) return folders;
+  const ranks = new Map(saved.map((path, index) => [path, index]));
+  const sorted = folders.filter(folder => folder.depth > 0 && folder.node.name !== '浏览器下载')
+    .sort((a, b) => (ranks.get(a.node.path) ?? Infinity) - (ranks.get(b.node.path) ?? Infinity));
+  let cursor = 0;
+  return folders.map(folder => folder.depth === 0 || folder.node.name === '浏览器下载' ? folder : sorted[cursor++]);
+}
+function reorderableSiblings(folder) {
+  return orderFolderSiblings(state.folders.filter(item =>
+    item.depth > 0 && item.parentPath === folder.parentPath && item.node.name !== '浏览器下载'), folder.parentPath);
+}
+function saveFolderSiblingOrder(parentPath, siblings) {
+  const order = readFolderOrder();
+  order[parentPath] = siblings.map(item => item.node.path);
+  try { localStorage.setItem(folderOrderKey(), JSON.stringify(order)); }
+  catch (error) { showToast(`分类顺序保存失败：${error.message}`); return false; }
+  renderFolders();
+  return true;
+}
+function focusFolderGrip(folderPath) {
+  [...el.folderTree.querySelectorAll('.folder-order-grip')]
+    .find(grip => grip.closest('.folder-row')?.dataset.folderPath === folderPath)?.focus();
+}
+function moveFolderByKeyboard(folder, offset) {
+  const siblings = reorderableSiblings(folder);
+  const index = siblings.findIndex(item => item.node.path === folder.node.path);
+  if (index < 0 || siblings.length < 2) return;
+  // 与创作浏览器快捷树一致：已在同级边界时给出提示，而不是静默不动。
+  if (index + offset < 0 || index + offset >= siblings.length) {
+    showToast(offset < 0 ? '已经在同级最前面' : '已经在同级最后面');
+    return;
+  }
+  const ordered = [...siblings];
+  ordered.splice(index + offset, 0, ...ordered.splice(index, 1));
+  if (saveFolderSiblingOrder(folder.parentPath, ordered)) focusFolderGrip(folder.node.path);
+}
+
+let folderOrderDrag = null;
+function folderRowForPath(path) {
+  return [...el.folderTree.querySelectorAll('.folder-row')].find(row => row.dataset.folderPath === path);
+}
+function clearFolderOrderMarkers() {
+  el.folderTree.querySelectorAll('.folder-order-above, .folder-order-below, .folder-order-source')
+    .forEach(row => row.classList.remove('folder-order-above', 'folder-order-below', 'folder-order-source'));
+}
+function updateFolderOrderPlan(x, y) {
+  const drag = folderOrderDrag;
+  if (!drag?.active) return;
+  clearFolderOrderMarkers();
+  folderRowForPath(drag.folder.node.path)?.classList.add('folder-order-source');
+  drag.plan = null;
+  const bounds = el.folderTree.getBoundingClientRect();
+  if (x < bounds.left || x > bounds.right || y < bounds.top || y > bounds.bottom) return;
+  const peers = reorderableSiblings(drag.folder)
+    .filter(item => item.node.path !== drag.folder.node.path)
+    .map(item => folderRowForPath(item.node.path))
+    .filter(row => row && row.getClientRects().length);
+  if (!peers.length) return;
+  let target = peers.find(row => y < row.getBoundingClientRect().top + row.getBoundingClientRect().height / 2);
+  const before = !!target;
+  if (!target) target = peers.at(-1);
+  drag.plan = { path: target.dataset.folderPath, position: before ? 'before' : 'after' };
+  target.classList.add(before ? 'folder-order-above' : 'folder-order-below');
+}
+function stopFolderOrderDrag(commit) {
+  const drag = folderOrderDrag;
+  if (!drag) return;
+  if (drag.scrollFrame) cancelAnimationFrame(drag.scrollFrame);
+  folderOrderDrag = null;
+  document.body.classList.remove('folder-order-dragging');
+  clearFolderOrderMarkers();
+  if (!commit || !drag.active || !drag.plan) return;
+  const siblings = reorderableSiblings(drag.folder);
+  const from = siblings.findIndex(item => item.node.path === drag.folder.node.path);
+  if (from < 0) return;
+  const ordered = [...siblings];
+  const [moved] = ordered.splice(from, 1);
+  let to = ordered.findIndex(item => item.node.path === drag.plan.path);
+  if (to < 0) return;
+  if (drag.plan.position === 'after') to++;
+  ordered.splice(to, 0, moved);
+  if (ordered.some((item, index) => item.node.path !== siblings[index].node.path))
+    saveFolderSiblingOrder(drag.folder.parentPath, ordered);
+}
+function scrollFolderOrderDrag() {
+  const drag = folderOrderDrag;
+  if (!drag?.active) return;
+  const bounds = el.folderTree.getBoundingClientRect();
+  const edge = 28;
+  if (drag.x >= bounds.left && drag.x <= bounds.right) {
+    const delta = drag.y < bounds.top + edge ? -12 : drag.y > bounds.bottom - edge ? 12 : 0;
+    if (delta) { el.folderTree.scrollTop += delta; updateFolderOrderPlan(drag.x, drag.y); }
+  }
+  drag.scrollFrame = requestAnimationFrame(scrollFolderOrderDrag);
+}
+window.addEventListener('pointermove', event => {
+  const drag = folderOrderDrag;
+  if (!drag || event.pointerId !== drag.pointerId) return;
+  drag.x = event.clientX; drag.y = event.clientY;
+  if (!drag.active && Math.hypot(drag.x - drag.startX, drag.y - drag.startY) > 5) {
+    drag.active = true;
+    document.body.classList.add('folder-order-dragging');
+    scrollFolderOrderDrag();
+  }
+  if (drag.active) { event.preventDefault(); updateFolderOrderPlan(drag.x, drag.y); }
+}, { passive: false });
+window.addEventListener('pointerup', event => {
+  if (folderOrderDrag && event.pointerId === folderOrderDrag.pointerId) {
+    updateFolderOrderPlan(event.clientX, event.clientY);
+    stopFolderOrderDrag(true);
+  }
+});
+window.addEventListener('pointercancel', event => {
+  if (folderOrderDrag && event.pointerId === folderOrderDrag.pointerId) stopFolderOrderDrag(false);
+});
+window.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && folderOrderDrag) { event.preventDefault(); stopFolderOrderDrag(false); }
+});
+window.addEventListener('storage', event => {
+  if (event.key === folderOrderKey() && state.tree) renderFolders();
+});
 
 function collectTree(root) {
   const folders = [];
@@ -286,6 +464,30 @@ function buildFolderRow(folder) {
   count.className = 'folder-count';
   count.textContent = String(folder.node.fileCount || 0);
   row.append(disclosure, button, count);
+  if (folder.depth > 0 && folder.node.name !== '浏览器下载') {
+    const grip = document.createElement('button');
+    grip.type = 'button';
+    grip.className = 'folder-order-grip';
+    grip.draggable = false;
+    grip.setAttribute('aria-label', `拖动调整「${folder.node.name}」的同级顺序；Alt+上或下键换位`);
+    grip.setAttribute('aria-keyshortcuts', 'Alt+ArrowUp Alt+ArrowDown');
+    grip.title = grip.getAttribute('aria-label');
+    grip.addEventListener('pointerdown', event => {
+      if (event.button !== 0 || folderOrderDrag) return;
+      event.stopPropagation();
+      grip.setPointerCapture(event.pointerId);
+      folderOrderDrag = { folder, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY,
+        x: event.clientX, y: event.clientY, active: false, plan: null, scrollFrame: 0 };
+    });
+    grip.addEventListener('keydown', event => {
+      if (!event.altKey || event.ctrlKey || event.metaKey) return;
+      if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+      event.preventDefault();
+      event.stopPropagation();
+      moveFolderByKeyboard(folder, event.key === 'ArrowUp' ? -1 : 1);
+    });
+    row.appendChild(grip);
+  }
   return row;
 }
 
@@ -293,8 +495,9 @@ function appendFolderRows(parent, folders, parentPath, rendered) {
   // 根节点 path 与 parentPath 同为 ''，子级与根共用 '' 作为父路径；
   // 递归会提前渲染后续兄弟，循环体内必须实时检查 done 防止重复渲染。
   const done = rendered || new Set();
-  for (const folder of folders) {
-    if (folder.parentPath !== parentPath || done.has(folder)) continue;
+  const siblings = orderFolderSiblings(folders.filter(folder => folder.parentPath === parentPath && !done.has(folder)), parentPath);
+  for (const folder of siblings) {
+    if (done.has(folder)) continue;
     done.add(folder);
     parent.appendChild(buildFolderRow(folder));
     if (!folder.hasChildren) continue;
@@ -954,6 +1157,7 @@ function renderAssets({ preserveScroll = false } = {}) {
     el.assetGrid.appendChild(more);
   }
   el.assetGrid.scrollTop = preserveScroll ? previousScrollTop : 0;
+  scheduleViewSave();
 }
 
 function applyPanelState(panel) {
@@ -1495,6 +1699,11 @@ function bindEvents() {
   el.selectVisible.addEventListener('click', () => {
     document.querySelectorAll('.asset-card').forEach(card => state.selectedPaths.add(card.dataset.path));
     updateSelectionBar();
+    // 网格有 120 项渲染上限：库更大时「全选」只覆盖已渲染部分，必须说清楚，避免误以为全库都已选中
+    const rendered = document.querySelectorAll('.asset-card').length;
+    if (state.assets.length > rendered) {
+      showToast(`已选中当前显示的 ${rendered} 项；库共 ${state.assets.length} 项，可用搜索缩小范围后再全选`);
+    }
   });
   // 批量导入剪映 = 多选后直接拖动任一选中卡（多文件原生拖动），见 dragstart 逻辑
   el.batchDelete.addEventListener('click', () => batchDeleteSelected().catch(error => showToast(error.message)));
@@ -1558,7 +1767,12 @@ async function loadLibrary({ select } = {}) {
   const stats = data.stats || {};
   el.librarySummary.textContent = `${state.config.project?.name || data.rootName || '创作资产库'} · ${stats.files || 0} 项 · ${stats.sizeText || '0 B'}`;
   renderFolders();
-  renderAssets();
+  renderAssets({ preserveScroll: true });
+  if (pendingView) {
+    el.assetGrid.scrollTop = Math.max(0, Number(pendingView.scroll) || 0);
+    el.folderTree.scrollTop = Math.max(0, Number(pendingView.treeScroll) || 0);
+    pendingView = null;
+  }
   // 选择栏与卡片选中态跟随最终选择结果（renderAssets 已按 selectedPaths 渲染卡片），
   // 而不是每次刷新都无条件隐藏。
   updateSelectionBar();
@@ -1611,6 +1825,7 @@ async function focusExternalAsset(request) {
 async function boot() {  bindEvents();
   try {
     state.config = await API.getConfig();
+    restoreAssetView();
     applyPanelState(state.config.panel);
     el.capabilityNote.textContent = SURFACE_MODE === 'library'
       ? '与视频、音频和成片同属资产中心'

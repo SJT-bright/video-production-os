@@ -44,6 +44,8 @@ function normalizeSnapshot(snapshot) {
       id, serviceId, mode, url,
       customName: typeof source.customName === 'string'
         ? [...source.customName].slice(0, MAX_TAB_NAME_LENGTH).join('') : '',
+      // 仅在为 true 时保留字段：旧会话文件与新快照都不写入 pinned:false，保持字节兼容
+      ...(source.pinned === true ? { pinned: true } : {}),
     });
   }
   const lastModeTabs = {};

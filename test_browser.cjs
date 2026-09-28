@@ -373,10 +373,11 @@ async function main() {
       `Agent 分类「${section.name}」点击后没有展开状态`);
     check((await firstCard.locator('.md-body').textContent()).trim().length > 0,
       `Agent 分类「${section.name}」展开后没有完整正文`);
-    check(await firstCard.locator('.k-card-actions button').count() === 2,
-      `Agent 分类「${section.name}」展开后缺少编辑或删除操作`);
-    check(await firstCard.locator('.k-card-foot button', { hasText: /复制/ }).count() === 1,
-      `Agent 分类「${section.name}」展开后缺少复制操作`);
+    check(await firstCard.locator('.k-card-actions button').count() === 3,
+      `Agent 分类「${section.name}」展开后缺少复制、编辑或删除操作`);
+    // 复制固定在卡片顶部操作区，长模板不用滚到底部
+    check(await firstCard.locator('.k-card-actions button', { hasText: /复制/ }).count() === 1,
+      `Agent 分类「${section.name}」展开后头部缺少复制操作`);
     check(await firstCard.locator('.k-card-foot button', { hasText: '提示词区' }).count() === 1,
       `Agent 分类「${section.name}」展开后缺少发送到创作浏览器入口`);
 

@@ -14,7 +14,7 @@ const { MAC_PROJECT_ROOT_FROM_APP } = require('./electron/runtime-project-path.c
 
 const APP_DIR = __dirname;
 const PROJECT_ROOT = path.dirname(APP_DIR);
-const DIST_ROOT = path.join(APP_DIR, 'dist');
+const DIST_ROOT = path.resolve(readArg('--out') || path.join(APP_DIR, 'dist'));
 const PRODUCT_NAME = '视频制作 OS';
 const BUNDLE_ID = 'local.video-production-os';
 const packageInfo = require('./package.json');

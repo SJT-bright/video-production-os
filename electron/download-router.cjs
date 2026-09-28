@@ -2,9 +2,10 @@
 
 const fs = require('fs');
 const path = require('path');
+const { resolveCreativeAsset } = require('../creative-assets.cjs');
 
-const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.avif', '.svg']);
-const VIDEO_EXTS = new Set(['.mp4', '.mov', '.webm', '.mkv', '.avi', '.m4v']);
+const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.avif', '.svg', '.heic', '.heif', '.tif', '.tiff', '.ico', '.psd', '.dng', '.cr2']);
+const VIDEO_EXTS = new Set(['.mp4', '.mov', '.webm', '.mkv', '.avi', '.m4v', '.mpeg', '.mpg', '.wmv', '.flv', '.3gp', '.ogv', '.m2ts', '.mts']);
 const AUDIO_EXTS = new Set(['.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.opus', '.wma', '.aiff', '.aif', '.amr', '.ape']);
 const INVALID_FILENAME = /[<>:"/\\|?*\u0000-\u001f]/g;
 const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
@@ -18,8 +19,7 @@ function classifyDownload({ filename = '', mimeType = '', mode = 'video', servic
   if (mime.startsWith('image/') || IMAGE_EXTS.has(ext)) return 'image';
   if (mime.startsWith('video/') || VIDEO_EXTS.has(ext)) return 'video';
   if (mime.startsWith('audio/') || AUDIO_EXTS.has(ext)) return 'audio';
-  if (mode === 'image' || ['gpt', 'midjourney'].includes(serviceId)) return 'image-other';
-  return 'video-other';
+  return 'file';
 }
 
 function sanitizeFilename(filename, now = new Date()) {
@@ -81,18 +81,36 @@ function resolveDownloadTarget({
   const kind = classifyDownload({ filename, mimeType, mode, serviceId });
   const platformFolder = sanitizeFilename(serviceLabel || serviceId || '其他平台', now);
   const day = dateFolder(now);
-  const isImage = kind === 'image' || kind === 'image-other';
+  const isImage = kind === 'image';
   const scopedDirectories = projectDirectories && typeof projectDirectories === 'object' ? projectDirectories : null;
   if (isImage && !scopedDirectories?.image && !obsidianVault) throw new Error('图片归档目录尚未连接');
-  const base = isImage
-    ? (scopedDirectories?.image || path.join(obsidianVault, 'ai创作短剧', '韩剧制作', '浏览器生成'))
-    : kind === 'audio'
-      ? (scopedDirectories?.audio || path.join(projectRoot, '素材库', '浏览器生成'))
-      : (scopedDirectories?.video || path.join(projectRoot, '素材库', '浏览器生成'));
+  if (kind === 'file' && scopedDirectories && !scopedDirectories.downloads) throw new Error('下载目录尚未连接');
+  const base = kind === 'file'
+    ? (scopedDirectories?.downloads || path.join(projectRoot, '素材库', '浏览器下载'))
+    : isImage
+      ? (scopedDirectories?.image || path.join(obsidianVault, 'ai创作短剧', '韩剧制作', '浏览器生成'))
+      : kind === 'audio'
+        ? (scopedDirectories?.audio || path.join(projectRoot, '素材库', '浏览器生成'))
+        : (scopedDirectories?.video || path.join(projectRoot, '素材库', '浏览器生成'));
   const directory = path.join(base, platformFolder, day);
   const safeName = sanitizeFilename(filename, now);
   const targetPath = uniquePath(path.join(directory, safeName), exists);
   return { kind, directory, targetPath, isImage, projectScoped: !!scopedDirectories };
+}
+
+async function deleteBrowserDownloadFile({ libraryRoot, downloadsRoot, relativePath }) {
+  const entry = resolveCreativeAsset(libraryRoot, relativePath, 'file');
+  if (!entry || !entry.stat.isFile()) throw new Error('下载文件不存在');
+  const root = fs.realpathSync(downloadsRoot);
+  const within = path.relative(root, entry.abs);
+  if (!within || within === '..' || within.startsWith(`..${path.sep}`) || path.isAbsolute(within)) {
+    throw new Error('只能永久删除当前剧本的浏览器下载文件');
+  }
+  if (classifyDownload({ filename: path.basename(entry.abs) }) !== 'file') {
+    throw new Error('图片、视频和音频不属于浏览器下载文件');
+  }
+  await fs.promises.unlink(entry.abs);
+  return entry.abs;
 }
 
 module.exports = {
@@ -101,4 +119,5 @@ module.exports = {
   dateFolder,
   uniquePath,
   resolveDownloadTarget,
+  deleteBrowserDownloadFile,
 };

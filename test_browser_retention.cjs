@@ -160,7 +160,7 @@ function createController(filePath) {
         return partitions.get(name);
       },
     },
-    configureSession() {}, installCreatorContextMenu() {}, dismissAssetOverlay() {},
+    configureSession() {}, installCreatorContextMenu() {}, dismissAssetOverlay() {}, closeFloatVideoWindow() {},
     sendCreator() {}, sendMain() {}, sendAssetPanelState() {}, protectLocalWindow() {}, enableRendererRecovery() {},
     macWindowChrome: () => ({}),
     logDiagnostic: (scope, detail) => diagnostics.push({ scope, detail: String(detail) }),

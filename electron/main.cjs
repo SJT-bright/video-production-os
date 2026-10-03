@@ -239,6 +239,11 @@ function isTrustedDragTraySender(event) {
   return !!dragTrayWindow && !dragTrayWindow.isDestroyed() && event.sender === dragTrayWindow.webContents;
 }
 
+// 单视频置顶浮窗：只认这一个浮窗自己的 webContents（无 parent、独立于工作区宿主窗口）。
+function isTrustedFloatVideoSender(event) {
+  return !!floatVideoWindow && !floatVideoWindow.isDestroyed() && event.sender === floatVideoWindow.webContents;
+}
+
 function isTrustedMediaSender(event) {
   // 共享能力（原生拖拽等）：创作窗口 HTML 层、完整资产库、剪映悬浮窗三者皆可
   return isTrustedCreatorSender(event) || isTrustedAssetSender(event) || isTrustedDragTraySender(event);
@@ -251,9 +256,11 @@ function requireTrusted(event, kind) {
       ? isTrustedAssetSender(event)
       : kind === 'tray'
         ? isTrustedDragTraySender(event)
-        : kind === 'media'
-          ? isTrustedMediaSender(event)
-          : isTrustedCreatorSender(event);
+        : kind === 'float'
+          ? isTrustedFloatVideoSender(event)
+          : kind === 'media'
+            ? isTrustedMediaSender(event)
+            : isTrustedCreatorSender(event);
   if (!trusted) throw new Error('拒绝未经授权的桌面操作');
 }
 
@@ -1710,6 +1717,8 @@ function ensureWorkspaceWindow() {
   win.on('close', () => {
     persistBrowserSession();
     closingWorkspace = true;
+    // 工作区宿主窗口关闭时单视频浮窗一并关闭（浮窗不独立存活，避免无主窗口继续置顶）。
+    closeFloatVideoWindow('workspace-closed');
     // 摘下后保留的网页不在窗口子树中，真正关闭窗口时也要释放它们。
     for (const tab of [...browserTabs.values()]) destroyTab(tab);
     if (assetView && !assetView.webContents.isDestroyed()) {
@@ -1737,6 +1746,8 @@ function navigateWorkspace(surface, params = {}) {
       workspaceSurface = surface;
       creatorLayoutReady = false;
       chromeOverlaysHidden = false;
+      // 浮窗属于创作浏览器的左栏联动：回到工作台界面时一并关闭，避免遗留无主置顶窗。
+      if (surface !== 'creator') closeFloatVideoWindow('workspace-closed');
       applyCreatorLayout();
       const address = new URL(surface === 'creator' ? '/creator.html' : '/', localServerInfo.url);
       for (const [key, value] of Object.entries(params)) address.searchParams.set(key, value);
@@ -1763,6 +1774,8 @@ async function createCreatorWindow(initialRequest = 'image') {
   const requestedProjectId = String(request.projectId || '').trim();
   const project = requestedProjectId ? creativeProjectStore.activate(requestedProjectId) : creativeProjectStore.active();
   if (!project) throw new Error('请先选择一个剧本或灵感工作区');
+  // 换剧本：正在置顶的单视频不再属于当前剧本，立即关浮窗并通知左栏还原卡片（绝不拖出旧剧本文件）。
+  if (floatVideoState && floatVideoState.projectId !== project.id) closeFloatVideoWindow('project-changed');
   productionStore?.activateProject(project.id);
   serverModule.broadcastCreativeProjects?.();
   serverModule.broadcastCreativeAssets?.();
@@ -1930,6 +1943,238 @@ function toggleDragTrayWindow() {
   }
   createDragTrayWindow();
   return { open: true };
+}
+
+// —— 单视频置顶浮窗（创作浏览器左栏右键 → 浮到最顶层 → 从浮窗原生拖进剪映）——
+// 与剪映联动窗的关系：同一套安全边界（requireTrusted + requireCreativeAsset + webContents.startDrag），
+// 但这里是「一次一个视频」的独立窗口，不参与联动窗的多选整批拖出，也不改动它的任何行为。
+// 硬约束：① 只允许当前剧本里的真实视频文件（图片/音频/文档/任意路径一律拒绝）；
+// ② 全应用只保留一个浮窗——同文件重复请求只置前，换文件先关旧窗再开新窗；
+// ③ 浮窗只读展示与拖出，绝不复制、移动或删除素材文件；× 关闭只关窗；
+// ④ 浮窗关闭（含 Cmd/Ctrl+W 等系统关闭、剧本切换、换文件、工作区退出）都向 creator 窗口
+//    回发 creator:float-video-closed {path}，由左栏还原对应卡片状态；
+// ⑤ 每次读取信息与每次拖出都按「当前剧本」重新校验：切剧本后旧剧本文件既不能再显示也不能拖出。
+const FLOAT_VIDEO_SIZE = Object.freeze({ width: 384, height: 336, minWidth: 300, minHeight: 240 });
+let floatVideoWindow = null;
+// { path, projectId, absolutePath, size }：浮窗当前唯一允许显示/拖出的视频，换窗即重建。
+let floatVideoState = null;
+
+function floatVideoBoundsFile() {
+  return path.join(process.env.VIDEO_OS_DATA_DIR || app.getPath('temp'), 'float-video-bounds.json');
+}
+
+// 位置钳制在最近显示器可用区内：记忆或兜底拖拽都可能把浮窗留在外接屏外，重启后找不回来。
+function clampFloatVideoBounds(bounds) {
+  const width = Math.max(FLOAT_VIDEO_SIZE.minWidth, Math.min(Number(bounds.width) || FLOAT_VIDEO_SIZE.width, 760));
+  const height = Math.max(FLOAT_VIDEO_SIZE.minHeight, Math.min(Number(bounds.height) || FLOAT_VIDEO_SIZE.height, 900));
+  try {
+    const area = screen.getDisplayNearestPoint({ x: Math.round(bounds.x) || 0, y: Math.round(bounds.y) || 0 }).workArea;
+    const x = Math.max(area.x - width + 120, Math.min(Number(bounds.x) || 0, area.x + area.width - 120));
+    const y = Math.max(area.y, Math.min(Number(bounds.y) || 0, area.y + area.height - 40));
+    return { ...bounds, x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) };
+  } catch {
+    return { ...bounds, width: Math.round(width), height: Math.round(height) };
+  }
+}
+
+function defaultFloatVideoBounds() {
+  let area = null;
+  try {
+    const display = creatorWindow && !creatorWindow.isDestroyed()
+      ? screen.getDisplayMatching(creatorWindow.getBounds())
+      : screen.getPrimaryDisplay();
+    area = display.workArea;
+  } catch {
+    area = { x: 0, y: 0, width: 1440, height: 900 };
+  }
+  return clampFloatVideoBounds({
+    x: Math.round(area.x + (area.width - FLOAT_VIDEO_SIZE.width) / 2),
+    y: Math.round(area.y + (area.height - FLOAT_VIDEO_SIZE.height) / 2),
+    width: FLOAT_VIDEO_SIZE.width,
+    height: FLOAT_VIDEO_SIZE.height,
+  });
+}
+
+// 视频/当前剧本的双重门禁：必须落在当前激活剧本目录内、解析为创作资产库里的真实普通文件，
+// 且 classify 为 video —— 图片、音频、文档、越界路径、符号链接、成片库外的一切都在此被拒。
+function requireFloatVideoAsset(relativePath) {
+  const requested = String(relativePath || '').replace(/\\/g, '/');
+  if (!requested) throw new Error('缺少视频路径');
+  const { absolutePath } = requireCreativeAsset(requested, 'video');
+  let stat;
+  try {
+    stat = fs.statSync(absolutePath);
+  } catch {
+    throw new Error('视频文件已不存在');
+  }
+  if (!stat.isFile()) throw new Error('只能浮出创作资产库内的真实视频文件');
+  if (stat.size > 20 * 1024 * 1024 * 1024) throw new Error('视频超过 20 GB，拒绝直接拖拽');
+  return { path: requested, absolutePath, size: stat.size };
+}
+
+// 渲染层只拿到相对路径 + 同名文件的本地预览地址（同源 /api/creative-assets/file，受信任 UI 校验），
+// 不暴露绝对路径；预览地址里的 project 参数始终是「当前」剧本 id。
+function floatVideoPublicInfo(asset) {
+  const project = creativeProjectStore.active();
+  const rel = String(asset && asset.path || '');
+  if (!project || !rel || !localServerInfo) throw new Error('浮窗已关闭');
+  return {
+    path: rel,
+    name: path.basename(rel),
+    kind: 'video',
+    projectId: project.id,
+    projectName: project.name || '',
+    size: Number(asset.size) || 0,
+    fileUrl: `${localServerInfo.url}/api/creative-assets/file?project=${encodeURIComponent(project.id)}&p=${encodeURIComponent(rel)}`,
+  };
+}
+
+function notifyFloatVideoClosed(record, reason) {
+  // 每次浮出只还原一次：拖出收起后，后续销毁隐藏窗口不能重复通知左栏。
+  if (!record || !record.info || record.notified) return;
+  record.notified = true;
+  sendCreator('creator:float-video-closed', { ...record.info, reason: reason || record.reason || 'closed' });
+}
+
+function dismissFloatVideoAfterDrag(win) {
+  if (!win || win.isDestroyed() || win !== floatVideoWindow) return;
+  // macOS startDrag 返回时原生拖拽会话仍在进行。只隐藏，不销毁拖拽源；
+  // 单例留作下次右键复用，换视频/切剧本/退出时仍按原来的路径销毁。
+  try {
+    win.hide();
+    notifyFloatVideoClosed(win.__floatVideoRecord, 'dragged');
+  } catch (error) {
+    logDiagnostic('float-video-dismiss-after-drag', error);
+  }
+}
+
+// macOS 的 setVisibleOnAllWorkspaces 会改掉窗口级别，floating 置顶必须写在它后面。
+// 只在创建和首次显示时调用：重复调用会把进程标成无 Dock 图标，同文件置前不再走这里。
+function pinFloatVideoWindow(win) {
+  if (!win || win.isDestroyed()) return;
+  if (process.platform === 'darwin') {
+    try { win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true }); }
+    catch (error) { logDiagnostic('float-video-workspace', error); }
+  }
+  win.setAlwaysOnTop(true, 'floating');
+}
+
+function bringFloatVideoForward() {
+  const win = floatVideoWindow;
+  if (!win || win.isDestroyed()) return;
+  try {
+    // moveTop 对已置顶窗偶尔不生效；重设一次级别保证「浮到屏幕最顶层」。
+    win.setAlwaysOnTop(true, 'floating');
+    if (!win.isVisible()) win.showInactive();
+    win.moveTop();
+  } catch (error) {
+    logDiagnostic('float-video-front', error);
+  }
+}
+
+// 先摘全局引用再 close：换文件时旧的 closed 通知一定要发出，且不能被新窗口的引用比较吞掉。
+function closeFloatVideoWindow(reason = 'closed') {
+  const win = floatVideoWindow;
+  floatVideoWindow = null;
+  floatVideoState = null;
+  if (!win || win.isDestroyed()) return false;
+  if (win.__floatVideoRecord) win.__floatVideoRecord.reason = reason;
+  try {
+    win.close();
+  } catch (error) {
+    logDiagnostic('float-video-close', error);
+    notifyFloatVideoClosed(win.__floatVideoRecord, reason);
+  }
+  return true;
+}
+
+function createFloatVideoWindow(asset) {
+  if (!localServerInfo) throw new Error('本地服务尚未就绪');
+  const project = creativeProjectStore.active();
+  let saved = {};
+  try { saved = JSON.parse(fs.readFileSync(floatVideoBoundsFile(), 'utf-8')); } catch {}
+  const bounds = Number.isFinite(saved.x) && Number.isFinite(saved.y)
+    ? clampFloatVideoBounds({ x: saved.x, y: saved.y, width: saved.width, height: saved.height })
+    : defaultFloatVideoBounds();
+  const win = new BrowserWindow({
+    ...bounds,
+    minWidth: FLOAT_VIDEO_SIZE.minWidth, minHeight: FLOAT_VIDEO_SIZE.minHeight,
+    maxWidth: 760, maxHeight: 900,
+    title: '置顶视频浮窗',
+    frame: false, show: false, alwaysOnTop: true, fullscreenable: false,
+    minimizable: false, maximizable: false, skipTaskbar: true,
+    backgroundColor: '#131317',
+    webPreferences: {
+      preload: path.join(__dirname, 'float-video-preload.cjs'),
+      nodeIntegration: false, contextIsolation: true, sandbox: true,
+      webSecurity: true, spellcheck: false,
+    },
+  });
+  const record = {
+    info: { path: asset.path, projectId: project ? project.id : '', name: path.basename(asset.path) },
+    reason: 'closed',
+  };
+  win.__floatVideoRecord = record;
+  floatVideoWindow = win;
+  floatVideoState = { ...asset, projectId: project ? project.id : '' };
+  // macOS：所有桌面空间可见（含全屏 App）。Windows/Linux 没有等价 API，只保留 floating 置顶。
+  pinFloatVideoWindow(win);
+  protectLocalWindow(win);
+  win.webContents.on('preload-error', (_event, preloadPath, error) => logDiagnostic('float-video-preload:' + preloadPath, error));
+  win.webContents.on('render-process-gone', (_event, details) => logDiagnostic('float-video-renderer', JSON.stringify(details)));
+  let saveBoundsTimer = null;
+  const saveBounds = () => {
+    clearTimeout(saveBoundsTimer);
+    saveBoundsTimer = setTimeout(() => {
+      if (win.isDestroyed()) return;
+      try { fs.writeFileSync(floatVideoBoundsFile(), JSON.stringify(win.getBounds())); } catch {}
+    }, 300);
+  };
+  win.on('moved', saveBounds);
+  win.on('resize', saveBounds);
+  win.on('closed', () => {
+    clearTimeout(saveBoundsTimer);
+    if (floatVideoWindow === win) {
+      floatVideoWindow = null;
+      floatVideoState = null;
+    }
+    notifyFloatVideoClosed(record, record.reason);
+  });
+  win.loadURL(`${localServerInfo.url}/float-video.html`).catch(error => logDiagnostic('float-video-load', error));
+  win.once('ready-to-show', () => {
+    // 显示后再钉一次：macOS 可能在 show 时丢掉「所有空间可见」或 floating 级别。
+    // 不抢创作面板焦点：右键时左栏可能正在做内联编辑，showInactive 与联动窗同一策略。
+    if (win.isDestroyed()) return;
+    pinFloatVideoWindow(win);
+    bringFloatVideoForward();
+  });
+  return win;
+}
+
+// 打开（或置前）单视频浮窗：一次只保留一个窗，换文件先关旧再开新。
+function openFloatVideoWindow(payload) {
+  if (!localServerInfo) throw new Error('本地服务尚未就绪');
+  const requested = typeof payload === 'string' ? payload : (payload && payload.path);
+  const asset = requireFloatVideoAsset(requested);
+  const project = creativeProjectStore.active();
+  if (floatVideoWindow && !floatVideoWindow.isDestroyed()) {
+    const sameFile = floatVideoState
+      && floatVideoState.path === asset.path
+      && floatVideoState.projectId === (project ? project.id : '');
+    if (sameFile) {
+      // 已拖出收起的窗口再次浮出，开启新一轮关闭/还原通知。
+      if (floatVideoWindow.__floatVideoRecord) floatVideoWindow.__floatVideoRecord.notified = false;
+      bringFloatVideoForward();
+      return { ok: true, path: asset.path, reused: true };
+    }
+    // 换文件：旧窗关闭会通知 creator 还原旧卡片，随后左栏只保留新卡片处于浮窗态。
+    closeFloatVideoWindow('replaced');
+  } else {
+    floatVideoWindow = null;
+    floatVideoState = null;
+  }
+  createFloatVideoWindow(asset);
+  return { ok: true, path: asset.path, reused: false };
 }
 
 function registerIpc() {
@@ -2574,6 +2819,63 @@ function registerIpc() {
     const [x, y] = win.getPosition();
     const [width, height] = win.getSize();
     const next = clampDragTrayBounds({ x: x + dx, y: y + dy, width, height });
+    win.setPosition(next.x, next.y);
+  });
+
+  // —— 单视频置顶浮窗 IPC ——
+  // 打开：只信创作浏览器宿主窗口，路径必须是当前剧本里的真实视频文件；成功返回 {path}。
+  ipcMain.handle('creator:float-video', (event, payload = {}) => {
+    requireTrusted(event, 'creator');
+    return openFloatVideoWindow(payload);
+  });
+  // 浮窗读取当前视频信息：每次都按当前剧本重新校验，剧本已切换则立即关窗并通知左栏还原。
+  ipcMain.handle('float-video:get-info', event => {
+    requireTrusted(event, 'float');
+    if (!floatVideoState) throw new Error('浮窗已关闭');
+    let asset;
+    try {
+      asset = requireFloatVideoAsset(floatVideoState.path);
+    } catch (error) {
+      closeFloatVideoWindow('stale');
+      throw error;
+    }
+    return floatVideoPublicInfo(asset);
+  });
+  // 原生拖出：与剪映联动窗同一条 webContents.startDrag 路线；只允许浮窗当前那一个视频，
+  // 且在此刻再校验一次「当前剧本 + 真实视频文件」，杜绝把旧剧本或别的素材拖进剪映。
+  ipcMain.on('float:start-asset-drag', (event, payload = {}) => {
+    const resultChannel = 'float:drag-result';
+    try {
+      requireTrusted(event, 'float');
+      const win = BrowserWindow.fromWebContents(event.sender);
+      if (!win || !win.isVisible()) throw new Error('浮窗已收起，请重新右键浮出视频');
+      const requested = String((payload && payload.path) || payload || '').replace(/\\/g, '/');
+      if (!floatVideoState) throw new Error('浮窗已关闭');
+      if (requested !== floatVideoState.path) throw new Error('浮窗只能拖出当前置顶的视频');
+      const { absolutePath } = requireFloatVideoAsset(requested);
+      event.sender.startDrag({ file: absolutePath, icon: dragIconFor(absolutePath) });
+      if (!event.sender.isDestroyed()) event.sender.send(resultChannel, { ok: true, path: requested, count: 1 });
+      dismissFloatVideoAfterDrag(win);
+    } catch (error) {
+      if (!event.sender.isDestroyed()) event.sender.send(resultChannel, { ok: false, error: error.message });
+    }
+  });
+  // 右上角 ×：只关窗，不删除、不移动、不复制文件；关闭通知由 closed 事件统一发出。
+  ipcMain.on('float:close', event => {
+    requireTrusted(event, 'float');
+    closeFloatVideoWindow('user');
+  });
+  // 标题栏拖动兜底（原生 -webkit-app-region 生效时指针事件不会到达页面），并钳制回屏幕内。
+  ipcMain.on('float:move-window', (event, payload = {}) => {
+    requireTrusted(event, 'float');
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win || win.isDestroyed() || win !== floatVideoWindow) return;
+    const dx = Math.round(Number(payload.dx) || 0);
+    const dy = Math.round(Number(payload.dy) || 0);
+    if (!dx && !dy) return;
+    const [x, y] = win.getPosition();
+    const [width, height] = win.getSize();
+    const next = clampFloatVideoBounds({ x: x + dx, y: y + dy, width, height });
     win.setPosition(next.x, next.y);
   });
 

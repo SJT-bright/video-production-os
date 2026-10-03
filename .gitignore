@@ -1,6 +1,7 @@
 # Dependencies and local builds
 node_modules/
 dist/
+dist-*/
 *.app/
 *.dmg
 *.exe

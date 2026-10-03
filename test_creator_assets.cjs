@@ -261,13 +261,12 @@ async function run() {
     await page.waitForFunction(() => window.__assetTest.deleted.length === 1);
     assert.deepEqual(await page.evaluate(() => window.__assetTest.deleted), ['校园心动/人物资产/女主正脸.png']);
 
-    // 单卡改名：对话框预填去扩展名名称，提交后调用 rename 接口
+    // 单卡改名：在卡片原名称位置编辑，提交后调用 rename 接口。
     await heroCard.hover();
-    await heroCard.locator('.asset-card-actions button', { hasText: '改名' }).click();
-    await page.locator('#renameDialog[open]').waitFor({ state: 'attached' });
-    assert.equal(await page.locator('#renameInput').inputValue(), '女主正脸', '改名框应预填去扩展名的名称');
-    await page.locator('#renameInput').fill('女主四视图-白裙');
-    await page.locator('#renameForm button[type="submit"]').click();
+    const inlineName = page.locator('.asset-card[data-path="校园心动/人物资产/女主正脸.png"]').getByRole('textbox', { name: '素材名称' });
+    assert.equal(await inlineName.innerText(), '女主正脸.png', '原名称应直接可编辑');
+    await inlineName.fill('女主四视图-白裙');
+    await inlineName.press('Enter');
     for (let i = 0; i < 50 && !renameRequests.length; i++) await page.waitForTimeout(100);
     assert.equal(renameRequests.length, 1, '改名请求没有发出');
     assert.deepEqual(renameRequests[0], { path: '校园心动/人物资产/女主正脸.png', name: '女主四视图-白裙' });

@@ -1043,9 +1043,37 @@ function createAssetCard(item) {
   info.className = 'asset-card-copy';
   const name = document.createElement('strong');
   name.textContent = item.name;
+  name.contentEditable = 'plaintext-only';
+  name.tabIndex = 0;
+  name.setAttribute('role', 'textbox');
+  name.setAttribute('aria-label', '素材名称');
+  name.title = '点击改名；Enter 保存，Esc 取消';
+  name.addEventListener('click', event => event.stopPropagation());
+  name.addEventListener('dragstart', event => { event.preventDefault(); event.stopPropagation(); });
+  name.addEventListener('keydown', event => {
+    event.stopPropagation();
+    if (event.isComposing) return;
+    if (event.key === 'Enter') { event.preventDefault(); name.blur(); }
+    if (event.key === 'Escape') { event.preventDefault(); name.textContent = item.name; name.blur(); }
+  });
+  name.addEventListener('blur', async () => {
+    const value = name.textContent.trim();
+    if (!value || value === item.name) { name.textContent = item.name; return; }
+    try {
+      const result = await postAssetAction('rename', { path: item.path, name: value });
+      showToast(`已重命名为「${result.name}」`);
+      await loadLibrary({ select: state.selectedFolder });
+    } catch (error) {
+      name.textContent = item.name;
+      showToast(`重命名失败：${error.message}`);
+    }
+  });
   const meta = document.createElement('span');
   meta.textContent = `${item.sizeText || '未知大小'} · ${item.folderPath || '创作资产库'}`;
-  info.append(name, meta);
+  const titleRow = document.createElement('div');
+  titleRow.className = 'asset-card-title-row';
+  titleRow.append(name);
+  info.append(titleRow, meta);
 
   const actions = document.createElement('div');
   actions.className = 'asset-card-actions';
@@ -1057,15 +1085,12 @@ function createAssetCard(item) {
   showButton.type = 'button';
   showButton.textContent = '定位';
   showButton.addEventListener('click', () => showItem(item));
-  const renameButton = document.createElement('button');
-  renameButton.type = 'button';
-  renameButton.textContent = '改名';
-  renameButton.addEventListener('click', () => openRenameDialog(item));
   const moveButton = document.createElement('button');
   moveButton.type = 'button';
   moveButton.textContent = '移动';
   moveButton.addEventListener('click', () => openMoveDialog([item.path]));
-  actions.append(firstAction, showButton, renameButton, moveButton);
+  titleRow.append(firstAction);
+  actions.append(showButton, moveButton);
 
   // 多选圆点（左上角）+ 右上角删除标志：悬停浮现。
   const check = document.createElement('button');

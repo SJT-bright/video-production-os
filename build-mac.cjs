@@ -32,6 +32,15 @@ function readArg(name) {
   return index >= 0 ? process.argv[index + 1] : '';
 }
 
+// 单视频置顶浮窗渲染层（FV-BE-20260928）已列入 build-contract SOURCE_FILES（schema 5），
+// 常规复制与 sourceHashes 会覆盖它们。若合同暂时漏掉，下面只补拷、不登记哈希：
+// verify-build-manifest 要求清单键与合同严格相等，多一个键会判「文件集合不完整或异常」。
+// 合同补齐后此分支为空，不再打印待办。
+const FLOAT_VIDEO_RENDERER_FILES = Object.freeze(['float-video.html', 'float-video.css', 'float-video.js']);
+const FLOAT_VIDEO_UNDECLARED = FLOAT_VIDEO_RENDERER_FILES.filter(
+  relativePath => !SOURCE_FILES.includes(relativePath)
+);
+
 function sha256(filePath) {
   return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
 }
@@ -78,6 +87,11 @@ async function build() {
   try {
     for (const file of SOURCE_FILES) copyEntry(stageDir, file);
     for (const directory of SOURCE_DIRS) copyEntry(stageDir, directory);
+    // 合同尚未声明的浮窗渲染层文件：补拷进包，保证发行版能打开浮窗；不登记哈希，见上方说明。
+    for (const file of FLOAT_VIDEO_UNDECLARED) copyEntry(stageDir, file);
+    if (FLOAT_VIDEO_UNDECLARED.length) {
+      console.log(`MAC_BUILD_CONTRACT_PENDING unhashed=${FLOAT_VIDEO_UNDECLARED.join(',')} 请把这三项加入 build-contract.cjs 的 SOURCE_FILES 以纳入哈希与过期校验`);
+    }
     const runtimeConfig = {
       ...(PORTABLE_RELEASE ? { dataLocation: 'userData' } : {
         projectRoot: PROJECT_ROOT,

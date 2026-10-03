@@ -62,6 +62,11 @@ contextBridge.exposeInMainWorld('creatorAPI', Object.freeze({
   startAssetDrag: assetPath => ipcRenderer.send('creator:start-asset-drag', assetPath && typeof assetPath === 'object' ? assetPath : { path: assetPath }),
   startAssetDragSelection: paths => ipcRenderer.send('creator:start-asset-drag', { paths }),
   onAssetDragResult: callback => subscribe('creator:asset-drag-result', callback),
+  // 单视频置顶浮窗：右键左栏视频卡 → 浮到屏幕最顶层 → 从浮窗原生拖进剪映。
+  // 主进程按当前剧本校验，只接受真实视频文件；成功返回 {path}，失败 reject（调用方给提示）。
+  // 浮窗任何方式关闭后回发 creator:float-video-closed {path}，左栏据此还原卡片状态。
+  floatVideoAsset: relativePath => ipcRenderer.invoke('creator:float-video', relativePath && typeof relativePath === 'object' ? relativePath : { path: relativePath }),
+  onFloatVideoClosed: callback => subscribe('creator:float-video-closed', callback),
   deleteAsset: assetPath => ipcRenderer.invoke('creator:delete-creative-asset', { path: assetPath }),
   deleteBrowserDownload: assetPath => ipcRenderer.invoke('creator:delete-browser-download', { path: assetPath }),
   pageZoom: action => ipcRenderer.invoke('creator:page-zoom', { action }),

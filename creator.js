@@ -1339,7 +1339,6 @@ async function restoreAllPlatforms() {
 const expandedScriptGroups = new Set();
 const expandedScriptItems = new Set();
 const scriptDrafts = new Map(); // itemId -> {title, text}：编辑中的未保存草稿
-const renamingScriptGroupId = { id: '' };
 
 function scriptUid(prefix) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -1375,6 +1374,10 @@ function buildScriptGroup(group) {
   toggle.title = expanded ? '收起这一组' : '展开这一组';
   const name = document.createElement('strong');
   name.textContent = group.name;
+  editableCardName(name, '分组名称', 60, value => {
+    group.name = value;
+    saveWorkspace(true);
+  });
   const meta = document.createElement('span');
   meta.textContent = `${group.items.length} 段`;
   toggle.append(name, meta);
@@ -1403,17 +1406,6 @@ function buildScriptGroup(group) {
   });
   head.append(copyAll);
 
-  const rename = document.createElement('button');
-  rename.type = 'button';
-  rename.className = 'text-action';
-  rename.textContent = '改名';
-  rename.addEventListener('click', () => {
-    renamingScriptGroupId.id = group.id;
-    renderScripts();
-    const input = el.scriptGroups.querySelector('.script-group-rename-input');
-    if (input) { input.focus(); input.select(); }
-  });
-  head.append(rename);
 
   const remove = document.createElement('button');
   remove.type = 'button';
@@ -1431,42 +1423,6 @@ function buildScriptGroup(group) {
   head.append(remove);
   block.append(head);
 
-  if (renamingScriptGroupId.id === group.id) {
-    const renameRow = document.createElement('div');
-    renameRow.className = 'script-group-rename';
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.maxLength = 60;
-    input.className = 'script-group-rename-input';
-    input.setAttribute('aria-label', '分组名称');
-    input.value = group.name;
-    const commit = () => {
-      const next = input.value.trim();
-      renamingScriptGroupId.id = '';
-      if (next && next !== group.name) {
-        group.name = next;
-        saveWorkspace(true);
-        showToast('分组名称已保存');
-      }
-      renderScripts();
-    };
-    input.addEventListener('keydown', event => {
-      if (event.key === 'Enter') { event.preventDefault(); commit(); }
-      if (event.key === 'Escape') { renamingScriptGroupId.id = ''; renderScripts(); }
-    });
-    const confirmRename = document.createElement('button');
-    confirmRename.type = 'button';
-    confirmRename.className = 'text-action script-save';
-    confirmRename.textContent = '保存';
-    confirmRename.addEventListener('click', commit);
-    const cancelRename = document.createElement('button');
-    cancelRename.type = 'button';
-    cancelRename.className = 'text-action';
-    cancelRename.textContent = '取消';
-    cancelRename.addEventListener('click', () => { renamingScriptGroupId.id = ''; renderScripts(); });
-    renameRow.append(input, confirmRename, cancelRename);
-    block.append(renameRow);
-  }
 
   if (expanded) {
     const list = document.createElement('div');
@@ -1494,6 +1450,29 @@ function buildScriptGroup(group) {
   return block;
 }
 
+// 在原名称位置编辑，不额外占一行；Enter 提交，Escape 恢复。
+function editableCardName(node, label, maxLength, commit) {
+  node.contentEditable = 'plaintext-only';
+  node.tabIndex = 0;
+  node.setAttribute('role', 'textbox');
+  node.setAttribute('aria-label', label);
+  node.title = '点击改名；Enter 保存，Esc 取消';
+  let original = node.textContent;
+  node.addEventListener('click', event => event.stopPropagation());
+  node.addEventListener('keydown', event => {
+    event.stopPropagation();
+    if (event.isComposing) return;
+    if (event.key === 'Enter') { event.preventDefault(); node.blur(); }
+    if (event.key === 'Escape') { event.preventDefault(); node.textContent = original; node.blur(); }
+  });
+  node.addEventListener('focus', () => { original = node.textContent; });
+  node.addEventListener('blur', () => {
+    const value = node.textContent.trim().slice(0, maxLength);
+    node.textContent = value || original;
+    if (value && value !== original) commit(value);
+  });
+}
+
 function buildScriptItem(group, item, index) {
   const key = item.id;
   const draft = scriptDrafts.get(key);
@@ -1510,6 +1489,11 @@ function buildScriptItem(group, item, index) {
   toggle.setAttribute('aria-expanded', String(expanded));
   const title = document.createElement('strong');
   title.textContent = (draft ? draft.title : item.title) || '未命名段落';
+  editableCardName(title, '段落标题', 60, value => {
+    item.title = value; item.updatedAt = Date.now();
+    if (scriptDrafts.has(key)) scriptDrafts.get(key).title = value;
+    saveWorkspace(true);
+  });
   const preview = document.createElement('span');
   preview.textContent = (draft ? draft.text : item.text).replace(/\s+/g, ' ').slice(0, 48) || '（空）';
   toggle.append(title, preview);
@@ -1579,17 +1563,6 @@ function buildScriptItem(group, item, index) {
   if (expanded) {
     const editor = document.createElement('div');
     editor.className = 'script-item-editor';
-    const titleInput = document.createElement('input');
-    titleInput.type = 'text';
-    titleInput.maxLength = 60;
-    titleInput.className = 'script-item-title-input';
-    titleInput.setAttribute('aria-label', '段落标题');
-    titleInput.value = (draft ? draft.title : item.title) || '';
-    titleInput.placeholder = '段落标题，例如：第1场 教室 日';
-    head.insertBefore(titleInput, toggle);
-    toggle.textContent = '⌃';
-    toggle.classList.add('script-item-collapse');
-    toggle.setAttribute('aria-label', '收起段落');
     const text = document.createElement('textarea');
     text.className = 'script-item-text';
     text.spellcheck = false;
@@ -1620,10 +1593,10 @@ function buildScriptItem(group, item, index) {
     discard.textContent = '取消';
     discard.disabled = !scriptDrafts.has(key);
     discard.addEventListener('click', () => { scriptDrafts.delete(key); renderScripts(); });
-    for (const input of [titleInput, text]) {
+    for (const input of [text]) {
       input.addEventListener('input', () => {
-        scriptDrafts.set(key, { title: titleInput.value, text: text.value });
-        save.disabled = titleInput.value === item.title && text.value === item.text;
+        scriptDrafts.set(key, { title: title.textContent, text: text.value });
+        save.disabled = text.value === item.text;
         discard.disabled = false;
       });
     }
@@ -1643,7 +1616,6 @@ function addScriptGroup() {
   const group = { id: scriptUid('sg'), name, items: [] };
   state.scripts.groups.push(group);
   expandedScriptGroups.add(group.id);
-  renamingScriptGroupId.id = group.id;
   saveWorkspace(true); renderScripts();
   el.scriptAccordion.open = true;
   state.accordions.scripts = true;
@@ -1872,6 +1844,11 @@ function renderPromptTemplates() {
     toggle.setAttribute('aria-expanded', String(expandedTemplates.has(item.id)));
     const name = document.createElement('strong');
     name.textContent = draft.title;
+    editableCardName(name, '固定提示词标题', 40, value => {
+      item.title = value; item.updatedAt = Date.now();
+      if (templateDrafts.has(key)) templateDrafts.get(key).title = value;
+      saveWorkspace(true);
+    });
     const preview = document.createElement('span');
     preview.textContent = draft.body.replace(/\s+/g, ' ').slice(0, 54);
     toggle.append(name, preview);
@@ -1891,54 +1868,49 @@ function renderPromptTemplates() {
       if (activeTemplateIds[mode] === item.id) activeTemplateIds[mode] = '';
       saveWorkspace(true); renderPromptTemplates();
     });
-    row.append(toggle, remove);
+    const copy = document.createElement('button');
+    copy.type = 'button'; copy.className = 'text-action saved-template-copy'; copy.textContent = '复制';
+    copy.title = '复制提示词全文';
+    copy.addEventListener('click', async () => {
+      const value = (templateDrafts.get(key) || item).body;
+      if (!value.trim()) { showToast('提示词为空'); return; }
+      try {
+        await copyTextToClipboard(value);
+        activeTemplateIds[mode] = item.id; rememberTemplatePrompt(value, mode);
+        showToast('提示词已复制');
+      } catch { showToast('复制失败，请手动选择文本'); }
+    });
+    row.append(toggle, copy, remove);
     if (expandedTemplates.has(item.id)) {
       const body = document.createElement('div'); body.className = 'saved-template-body';
-      const title = document.createElement('input');
-      title.type = 'text'; title.maxLength = 40; title.className = 'saved-template-title-input';
-      title.setAttribute('aria-label', '固定提示词标题'); title.value = draft.title;
       const text = document.createElement('textarea');
       text.className = 'saved-template-text'; text.spellcheck = false;
       text.setAttribute('aria-label', '固定提示词正文'); text.value = draft.body;
-      // 复制固定在卡片顶部：长提示词不用滚到底部再找按钮
-      const topbar = document.createElement('div'); topbar.className = 'saved-template-topbar';
-      const copy = document.createElement('button');
-      copy.type = 'button'; copy.className = 'secondary-action saved-template-load saved-template-copy'; copy.textContent = '复制';
-      copy.title = '复制提示词全文';
-      copy.addEventListener('click', async () => {
-        if (!text.value.trim()) { showToast('提示词为空'); return; }
-        try {
-          await copyTextToClipboard(text.value);
-          activeTemplateIds[mode] = item.id; rememberTemplatePrompt(text.value, mode);
-          showToast('提示词已复制');
-        } catch { showToast('复制失败，请手动选择文本'); }
-      });
-      topbar.append(copy);
       const actions = document.createElement('div'); actions.className = 'saved-template-actions';
       const button = (label, handler, primary = false, extraClass = '') => {
         const b = document.createElement('button'); b.type = 'button'; b.textContent = label;
         b.className = (primary ? 'primary-action' : 'secondary-action') + ' saved-template-load' + (extraClass ? ' ' + extraClass : '');
         b.addEventListener('click', handler); actions.append(b); return b;
       };
-      const save = button('保存修改', () => {
-        if (!title.value.trim() || !text.value.trim()) {
-          showToast('请填写标题和提示词内容');
-          (!title.value.trim() ? title : text).focus(); return;
+      const save = button('保存', () => {
+        if (!text.value.trim()) {
+          showToast('请填写提示词内容');
+          text.focus(); return;
         }
-        item.title = title.value.trim(); item.body = text.value.trim(); item.updatedAt = Date.now();
+        item.body = text.value.trim(); item.updatedAt = Date.now();
         templateDrafts.delete(key); saveWorkspace(true); renderPromptTemplates();
         showToast('标题和提示词已保存');
       }, true);
       save.disabled = !templateDrafts.has(key);
-      for (const input of [title, text]) {
+      for (const input of [text]) {
         input.addEventListener('focus', () => { activeTemplateIds[mode] = item.id; });
         input.addEventListener('input', () => {
           activeTemplateIds[mode] = item.id;
-          templateDrafts.set(key, { title: title.value, body: text.value });
-          save.disabled = title.value === item.title && text.value === item.body;
+          templateDrafts.set(key, { title: name.textContent, body: text.value });
+          save.disabled = text.value === item.body;
         });
       }
-      body.append(topbar, title, text, actions); row.append(body);
+      body.append(text, actions); row.append(body);
     }
     el.promptTemplateList.append(row);
   }
@@ -2350,7 +2322,7 @@ function buildQuickFileCard(item) {
   button.title = `${item.name}\n点击放大或预览，可再跳转完整库`;
   if (typeof API.floatVideoAsset === 'function' && item.type === 'video' && item.path && item.downloadState !== 'progressing' && item.downloadState !== 'paused') {
     button.title += state.floatedVideoPaths.has(item.path)
-      ? '\n已浮出置顶小窗；点小窗 × 后恢复'
+      ? '\n已浮出置顶小窗；拖出后自动收起，也可点 × 关闭'
       : (typeof API.floatVideoAsset === 'function' ? '\n右键浮出置顶小窗，可直接拖进剪映' : '');
   }
   let preview;
@@ -2929,7 +2901,7 @@ function setQuickSelectMode(on) {
 /* ---------- 视频卡右键浮出（置顶小窗拖进剪映） ---------- */
 // 浮窗本体是桌面程序的原生置顶窗口，这里只负责右键触发、角标状态与关闭事件回流。
 // 同一视频重复右键 = 再次调用 floatVideoAsset（桌面程序把已有浮窗置前），UI 不把它当作关闭开关；
-// 唯一关闭入口是浮窗自己的 ×，关闭事件经 onFloatVideoClosed 回流后撤掉角标。
+// 浮窗拖出后自动收起，也可点 × 关闭；事件经 onFloatVideoClosed 回流后撤掉角标。
 // 浮出状态只存内存（floatedVideoPaths）：切换剧本清空、刷新自动复位，绝不写 localStorage，
 // 避免浮窗早已关闭时左栏还残留「已浮出」假角标。
 function floatedVideoCardNodes(assetPath) {

@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>置顶视频浮窗</title>
+  <link rel="stylesheet" href="float-video.css">
+</head>
+<body>
+  <header class="fv-head" aria-label="置顶视频浮窗标题栏，按住可拖动窗口">
+    <div class="fv-head-text">
+      <strong>置顶视频</strong>
+      <small id="fvProject">读取中…</small>
+    </div>
+    <button id="fvClose" class="fv-close" type="button" title="关闭浮窗（素材文件保留在资产库）" aria-label="关闭浮窗">×</button>
+  </header>
+  <main class="fv-body">
+    <div id="fvCard" class="fv-card" draggable="true" aria-label="可拖拽卡：按住拖进剪映">
+      <div class="fv-stage">
+        <video id="fvPreview" class="fv-preview" preload="metadata" muted playsinline disablepictureinpicture draggable="false" aria-hidden="true"></video>
+        <div id="fvStageState" class="fv-stage-state">正在读取预览…</div>
+        <span class="fv-play-mark" aria-hidden="true">▶</span>
+      </div>
+      <div class="fv-meta">
+        <span id="fvName" class="fv-name" title="">读取中…</span>
+        <span id="fvKind" class="fv-kind">视频 · 可拖拽到剪映</span>
+      </div>
+      <div id="fvGrip" class="fv-grip">按住此卡拖动，松手放入剪映</div>
+    </div>
+    <p class="fv-tip">拖出后自动收起；原视频仍保留在资产库。</p>
+  </main>
+  <div id="fvToast" class="fv-toast" role="status" aria-live="polite"></div>
+  <script src="float-video.js"></script>
+</body>
+</html>

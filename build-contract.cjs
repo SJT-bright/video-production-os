@@ -16,6 +16,9 @@ const SOURCE_FILES = Object.freeze([
   'drag-tray.css',
   'drag-tray.html',
   'drag-tray.js',
+  'float-video.css',
+  'float-video.html',
+  'float-video.js',
   'editor-exports.cjs',
   'media-source-watch.cjs',
   'index.html',
@@ -29,6 +32,8 @@ const SOURCE_FILES = Object.freeze([
 const SOURCE_DIRS = Object.freeze(['assets', 'electron', 'vendor']);
 // Every change to the verification semantics must invalidate old package manifests.
 // Version 4 adds the creative-project registry to the packaged runtime contract.
-const BUILD_SCHEMA_VERSION = 4;
+// Version 5 adds the single-video float window renderer (float-video.html/css/js).
+// electron/float-video-preload.cjs is already packaged via SOURCE_DIRS.
+const BUILD_SCHEMA_VERSION = 5;
 
 module.exports = { SOURCE_FILES, SOURCE_DIRS, BUILD_SCHEMA_VERSION };

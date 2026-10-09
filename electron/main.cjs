@@ -24,7 +24,11 @@ const { isSafeBrowserAddress, normalizeBrowserAddress } = require('./browser-add
 const { createCreatorPlatformStore } = require('./creator-platforms.cjs');
 const { createBrowserSessionStore } = require('./browser-session.cjs');
 const { buildCreatorContextMenuTemplate } = require('./creator-context-menu.cjs');
-const { classifyDownload, resolveDownloadTarget, deleteBrowserDownloadFile } = require('./download-router.cjs');
+const { classifyDownload, resolveDownloadTarget, deleteBrowserDownloadFile, dateFolder } = require('./download-router.cjs');
+const { createDownloadReview } = require('./download-review.cjs');
+const { createDownloadReviewUI } = require('./download-review-ui.cjs');
+const { createFloatPresentation } = require('./float-presentation.cjs');
+const VideoDisposition = require('../assets/ui/video-disposition.js');
 const { classifyCreativeAsset, ensureCreativeAssetRoot, resolveCreativeAsset, buildCreativeAssetTree } = require('../creative-assets.cjs');
 const { createCreatorAutomation, serveAutomation } = require('./creator-automation.cjs');
 const { resolveMacProjectRootFromBundle, macProjectDataDir } = require('./runtime-project-path.cjs');
@@ -147,6 +151,8 @@ const ALLOWED_TAB_MENU_ACTIONS = new Set([
   'rename', 'duplicate', 'copy-url', 'pin', 'mute', 'restore',
   'close-left', 'close-others', 'close-right', 'close',
 ]);
+// 这四个动作在 creator 页 DOM 菜单里是红色危险项；native 通道不传外观，菜单窗按白名单 id 补齐。
+const TAB_MENU_DANGER_ACTIONS = new Set(['close-left', 'close-others', 'close-right', 'close']);
 const browserSessionStore = createBrowserSessionStore({
   filePath: path.join(app.getPath('userData'), 'creator-browser-session.json'),
   onWarning: message => console.warn(`[browser-session] ${message}`),
@@ -193,6 +199,39 @@ const downloadOwners = new WeakMap();
 const configuredSessions = new Set();
 const recentDownloads = [];
 const activeDownloadItems = new Map();
+let downloadReviewUI = null;
+let appQuitting = false;
+let recoveringVideoDownloads = false;
+function validateVideoDownloadTarget(entry, destination) {
+  const project = creativeProjectStore.get(entry.projectId);
+  if (!project?.available || !['editable', 'processing'].includes(entry.choice)) throw new Error('下载所属剧本目录不可用');
+  const base = creativeProjectStore.category(project.id, 'generated-videos').absolutePath;
+  const allowed = path.join(base, entry.choice === 'processing' ? '待处理' : '可剪辑');
+  const relative = path.relative(allowed, destination);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('下载归档路径越界');
+  for (let current = destination; current !== CREATIVE_ASSET_DIR; current = path.dirname(current)) {
+    if (fs.existsSync(current) && fs.lstatSync(current).isSymbolicLink()) throw new Error('下载归档路径不能包含符号链接');
+    if (current === path.dirname(current)) throw new Error('下载归档路径无效');
+  }
+}
+const videoDownloadReview = createDownloadReview({
+  dataDir: process.env.VIDEO_OS_DATA_DIR,
+  targetFor(entry) {
+    const project = creativeProjectStore.get(entry.projectId);
+    if (!project || !project.available) throw new Error('下载所属剧本目录不可用，视频仍保留在暂存区');
+    const category = creativeProjectStore.category(project.id, 'generated-videos');
+    const base = category.absolutePath;
+    const target = resolveDownloadTarget({
+      projectRoot: PROJECT_ROOT, serviceId: entry.serviceId, serviceLabel: entry.serviceLabel,
+      filename: entry.filename, mimeType: 'video/mp4', mode: 'video', videoDisposition: entry.choice,
+      projectDirectories: { video: base }, now: new Date(`${entry.day}T12:00:00`),
+    });
+    validateVideoDownloadTarget(entry, target.targetPath);
+    fs.mkdirSync(target.directory, { recursive: true });
+    return sequentialImportTarget(target.directory, 'video', entry.filename, category.label);
+  },
+  validateTarget: validateVideoDownloadTarget,
+});
 let diagnosticLog = '';
 
 function initDiagnostics() {
@@ -537,6 +576,24 @@ function showEmptyBrowserMode(mode) {
   return browserState();
 }
 
+async function confirmClearBrowserTabs() {
+  const win = creatorWindow;
+  const cancelled = () => ({ ...browserState(), clearCancelled: true });
+  if (!browserTabs.size || !win || win.isDestroyed()) return cancelled();
+  const { response } = await dialog.showMessageBox(win, {
+    type: 'question',
+    title: '确认清空网页',
+    message: '确定清空全部网页吗？',
+    detail: '将关闭图片模式和视频模式的全部标签，网页中未提交的内容可能丢失。网站登录、剧本和素材会保留。',
+    buttons: ['取消', '清空网页'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  });
+  if (response !== 1 || win.isDestroyed()) return cancelled();
+  return clearBrowserTabs();
+}
+
 function clearBrowserTabs() {
   if ([...activeDownloadItems.values()].some(item => ['progressing', 'paused'].includes(item.record?.state))) {
     throw new Error('还有下载任务，请完成或取消下载后再清空网页');
@@ -710,7 +767,9 @@ function publicDownload(record) {
     mode: record.mode,
     kind: record.kind,
     filename: record.filename,
-    savePath: record.savePath,
+    savePath: record.pendingReview ? '' : record.savePath,
+    pendingReview: !!record.pendingReview,
+    videoDisposition: record.videoDisposition || '',
     state: record.state,
     receivedBytes: record.receivedBytes,
     totalBytes: record.totalBytes,
@@ -762,6 +821,67 @@ function archiveDownloadInProduction(record) {
 
 function broadcastDownload(record) {
   sendCreator('creator:download', publicDownload(record));
+}
+
+function chooseVideoDownload(record) {
+  if (!downloadReviewUI || appQuitting) return Promise.resolve('defer');
+  return downloadReviewUI.choose({ ...record, projectName: creativeProjectStore.get(record.productionSnapshot?.projectId)?.name || '原剧本' })
+    .then(choice => {
+      if (['editable', 'processing'].includes(choice)) {
+        videoDownloadReview.choose(record.id, choice);
+        record.videoDisposition = choice;
+        broadcastDownload(record);
+      }
+      return choice;
+    });
+}
+
+async function finishReviewedVideo(record) {
+  const result = await videoDownloadReview.finalize(record.id);
+  record.savePath = result.path;
+  record.filename = path.basename(result.path);
+  record.videoDisposition = result.choice;
+  record.pendingReview = false;
+  record.state = 'completed';
+  activeDownloadItems.delete(record.id);
+  if (!appQuitting) {
+    archiveDownloadInProduction(record);
+    broadcastDownload(record);
+    serverModule.broadcastCreativeAssets?.();
+    sendMain('os:download-complete', publicDownload(record));
+  }
+}
+
+async function recoverVideoDownloads() {
+  if (recoveringVideoDownloads || appQuitting || !downloadReviewUI) return;
+  recoveringVideoDownloads = true;
+  try {
+    for (const entry of videoDownloadReview.list()) {
+      if (activeDownloadItems.has(entry.id) || appQuitting) continue;
+      if (!entry.completed) {
+        // 退出时被中断的网络下载不能被当作完整视频。只清自己的暂存文件。
+        await videoDownloadReview.discard(entry.id);
+        sendCreator('creator:notice', '上次有视频下载未完成，请返回平台重新下载。');
+        continue;
+      }
+      const record = { ...entry, kind: 'video', mode: 'video', savePath: entry.stagePath,
+        pendingReview: true, state: 'paused', productionSnapshot: entry.productionSnapshot || { projectId: entry.projectId },
+        totalBytes: entry.size || 0, receivedBytes: entry.size || 0 };
+      recentDownloads.unshift(record);
+      activeDownloadItems.set(record.id, { item: null, record });
+      const choice = entry.choice || await chooseVideoDownload(record);
+      if (appQuitting || choice === 'defer') break;
+      if (choice === 'cancel') {
+        await videoDownloadReview.discard(record.id);
+        record.state = 'cancelled'; record.error = '下载已取消'; activeDownloadItems.delete(record.id);
+        broadcastDownload(record);
+      } else {
+        try { await finishReviewedVideo(record); }
+        catch (error) { record.error = `视频仍在暂存区：${error.message}`; broadcastDownload(record); }
+      }
+    }
+  } catch (error) { logDiagnostic('video-download-recovery', error); }
+  finally { recoveringVideoDownloads = false; }
 }
 
 function configureSession(serviceId, ses) {
@@ -823,6 +943,7 @@ function configureSession(serviceId, ses) {
     const productionSnapshot = captureProductionContext(serviceId, mode);
     const originalName = item.getFilename() || `download-${Date.now()}`;
     const id = `dl-${Date.now()}-${++downloadSequence}`;
+    const startedAt = new Date().toISOString();
     let target;
     let savePath;
     try {
@@ -836,11 +957,14 @@ function configureSession(serviceId, ses) {
         mimeType: item.getMimeType(),
         projectDirectories: activeProjectDirectories(),
       });
-      fs.mkdirSync(target.directory, { recursive: true });
-      // 图片/视频统一按“分类-序号”落盘（平台内点击下载也一样），UUID 乱名不再进入素材库。
-      savePath = (target.kind === 'image' || target.kind === 'video')
-        ? sequentialImportTarget(target.directory, target.kind, originalName)
-        : target.targetPath;
+      if (target.kind === 'video') {
+        const staged = videoDownloadReview.begin({ id, projectId: productionSnapshot.projectId, serviceId,
+          serviceLabel: displayLabel, filename: originalName, startedAt, day: dateFolder(), productionSnapshot });
+        savePath = staged.stagePath;
+      } else {
+        fs.mkdirSync(target.directory, { recursive: true });
+        savePath = target.kind === 'image' ? sequentialImportTarget(target.directory, target.kind, originalName) : target.targetPath;
+      }
       item.setSavePath(savePath);
     } catch (error) {
       event.preventDefault();
@@ -876,13 +1000,19 @@ function configureSession(serviceId, ses) {
       state: 'progressing',
       receivedBytes: 0,
       totalBytes: Math.max(0, item.getTotalBytes()),
-      startedAt: new Date().toISOString(),
+      startedAt,
       productionSnapshot,
+      pendingReview: target.kind === 'video',
     };
     recentDownloads.unshift(record);
     if (recentDownloads.length > 50) recentDownloads.length = 50;
-    activeDownloadItems.set(id, { item, record });
+    activeDownloadItems.set(id, { item, record, finished: false });
     broadcastDownload(record);
+    const classification = target.kind === 'video' ? chooseVideoDownload(record) : null;
+    if (classification) classification.then(choice => {
+      const transfer = activeDownloadItems.get(id);
+      if (choice === 'cancel' && transfer?.item === item && !transfer.finished) item.cancel();
+    }).catch(error => { record.error = `视频分类失败：${error.message}`; broadcastDownload(record); });
 
     item.on('updated', (_downloadEvent, state) => {
       record.state = state === 'interrupted' ? 'interrupted' : (item.isPaused() ? 'paused' : 'progressing');
@@ -891,13 +1021,36 @@ function configureSession(serviceId, ses) {
       broadcastDownload(record);
     });
 
-    item.once('done', (_downloadEvent, state) => {
-      activeDownloadItems.delete(id);
-      record.state = state;
+    item.once('done', async (_downloadEvent, state) => {
+      const transfer = activeDownloadItems.get(id);
+      if (transfer) transfer.finished = true;
+      record.state = state === 'completed' && record.pendingReview ? 'paused' : state;
       record.receivedBytes = Math.max(0, item.getReceivedBytes());
       record.totalBytes = Math.max(0, item.getTotalBytes());
       record.endedAt = new Date().toISOString();
       if (state !== 'completed') record.error = state === 'cancelled' ? '下载已取消' : '下载中断，可返回平台重试';
+      if (record.pendingReview) {
+        try {
+          if (state === 'completed') videoDownloadReview.complete(id);
+          else downloadReviewUI?.cancel(id);
+          const choice = await classification;
+          if (appQuitting || choice === 'defer') return;
+          if (state !== 'completed' || choice === 'cancel') {
+            await videoDownloadReview.discard(id);
+            activeDownloadItems.delete(id);
+            record.pendingReview = false; record.savePath = '';
+            if (choice === 'cancel') { record.state = 'cancelled'; record.error = '下载已取消'; }
+            broadcastDownload(record);
+          } else await finishReviewedVideo(record);
+        } catch (error) {
+          record.state = 'paused'; record.error = `视频仍保留在暂存区：${error.message}`;
+          broadcastDownload(record);
+          sendCreator('creator:notice', record.error);
+          logDiagnostic('video-download-finalize', error);
+        }
+        return;
+      }
+      activeDownloadItems.delete(id);
       if (state === 'completed') archiveDownloadInProduction(record);
       broadcastDownload(record);
       if (state === 'completed') {
@@ -933,26 +1086,14 @@ async function copyFileWithProgress(sourcePath, targetPath, onProgress) {
 
 // 导入资产自动按“类别-序号”重命名（例如 生成图片-007.png），序号在落盘目录内递增；
 // 平台点击下载保持原文件名，只有拖拽/手动导入走这条规则。
-const IMPORT_SEQUENCE_LABELS = Object.freeze({ image: '生成图片', video: '生成视频', audio: '音频' });
+const { nextSequentialImportName } = require('./import-names.cjs');
 
-function sequentialImportTarget(directory, kind, originalName) {
-  const label = IMPORT_SEQUENCE_LABELS[kind];
+function sequentialImportTarget(directory, kind, originalName, categoryLabel) {
+  const categoryId = { image: 'generated-images', video: 'generated-videos', audio: 'audio' }[kind];
+  const label = categoryLabel || (categoryId && creativeProjectStore.category(creativeProjectStore.active().id, categoryId).label);
   const extension = path.extname(originalName).toLowerCase();
   if (!label || !extension) return path.join(directory, path.basename(originalName));
-  let max = 0;
-  try {
-    const pattern = new RegExp(`^${label}-(\\d+)\\.`);
-    for (const entry of fs.readdirSync(directory)) {
-      const match = entry.match(pattern);
-      if (match) max = Math.max(max, Number.parseInt(match[1], 10) || 0);
-    }
-  } catch {}
-  let candidate = '';
-  do {
-    max += 1;
-    candidate = path.join(directory, `${label}-${String(max).padStart(3, '0')}${extension}`);
-  } while (fs.existsSync(candidate));
-  return candidate;
+  return path.join(directory, nextSequentialImportName(directory, label, originalName));
 }
 
 async function archiveExternalPaths(filePaths, allowedKinds) {
@@ -1782,6 +1923,7 @@ async function createCreatorWindow(initialRequest = 'image') {
   serverModule.broadcastProduction?.();
   activeMode = mode;
   const { reused } = await navigateWorkspace('creator', { mode, project: project.id });
+  setImmediate(() => { recoverVideoDownloads().catch(error => logDiagnostic('video-download-recovery', error)); });
   if (reused) {
     sendCreator('creator:project-changed', project);
     sendCreator('creator:set-mode', mode);
@@ -1828,6 +1970,7 @@ function lookupDownloadSavePath(downloadId) {
   const id = String(downloadId || '');
   if (!id) return '';
   const recent = recentDownloads.find(item => item.id === id);
+  if (recent?.pendingReview || (recent && recent.state !== 'completed')) return '';
   if (recent?.savePath) return recent.savePath;
   if (!productionStore || typeof productionStore.listInbox !== 'function') return '';
   try {
@@ -1928,9 +2071,9 @@ function createDragTrayWindow() {
       try { fs.writeFileSync(dragTrayBoundsFile(), JSON.stringify(dragTrayWindow.getBounds())); } catch {}
     }, 300);
   };
-  dragTrayWindow.on('moved', saveBounds);
+  dragTrayWindow.on('move', saveBounds);
   dragTrayWindow.on('resize', saveBounds);
-  dragTrayWindow.on('closed', () => { dragTrayWindow = null; });
+  dragTrayWindow.on('closed', () => { clearTimeout(saveBoundsTimer); dragTrayWindow = null; });
   dragTrayWindow.once('ready-to-show', () => { if (dragTrayWindow && !dragTrayWindow.isDestroyed()) dragTrayWindow.showInactive(); });
   dragTrayWindow.loadURL(`${localServerInfo.url}/drag-tray.html`).catch(error => logDiagnostic('drag-tray-load', error));
   return dragTrayWindow;
@@ -1943,6 +2086,319 @@ function toggleDragTrayWindow() {
   }
   createDragTrayWindow();
   return { open: true };
+}
+
+// —— 标签右键菜单窗（无边框小窗版原生菜单）——
+// 原生 Menu.popup 的消失由操作系统控制（点击别处立即消失），实现不了「消失前驻留 500ms」；
+// 这里换成与剪映联动窗同款的无边框小窗：主进程推送白名单过滤后的条目，
+// blur / Esc 只启动驻留定时（500ms），驻留期内再次呼出＝取消消失、原地换内容；
+// 点选动作立即回执（不等 120ms 淡出动画），渲染层播完淡出后通知关窗。
+const TAB_MENU_DISMISS_DELAY_MS = 500;
+const TAB_MENU_FADE_MS = 120;
+let tabMenuWindow = null;
+// 当前菜单会话：{ settled, finish, owner, window, x, y, dwellTimer, fadeTimer, onOwnerClosed }
+let tabMenuSession = null;
+
+function isTrustedTabMenuSender(event) {
+  return !!tabMenuWindow && !tabMenuWindow.isDestroyed() && event.sender === tabMenuWindow.webContents;
+}
+
+function closeTabMenuWindowNow() {
+  if (tabMenuWindow && !tabMenuWindow.isDestroyed()) tabMenuWindow.close();
+}
+
+// 统一回执出口：resolve 之后驻留定时、owner 监听全部解除，结果只产出一次。
+function finishTabMenuSession(result) {
+  const session = tabMenuSession;
+  if (!session || session.settled) return;
+  session.settled = true;
+  clearTimeout(session.dwellTimer);
+  if (session.owner && !session.owner.isDestroyed()) session.owner.removeListener('closed', session.onOwnerClosed);
+  session.finish(result);
+}
+
+// blur / Esc 后不立即关窗：驻留 TAB_MENU_DISMISS_DELAY_MS 再回执 cancelled 并关闭；
+// 驻留期内再次右键呼出会由 openTabMenuWindow 清掉这个定时器——「消失前被再次唤起＝不消失」。
+function startTabMenuDwell() {
+  const session = tabMenuSession;
+  if (!session || session.settled) return;
+  clearTimeout(session.dwellTimer);
+  session.dwellTimer = setTimeout(() => {
+    finishTabMenuSession(null);
+    closeTabMenuWindowNow();
+  }, TAB_MENU_DISMISS_DELAY_MS);
+}
+
+// 点选后的兜底收窗：正常由渲染层淡出 120ms 后 dismiss 关闭，这里防渲染层崩溃留下空窗。
+function scheduleTabMenuFadeClose(delay = TAB_MENU_FADE_MS) {
+  const session = tabMenuSession;
+  if (!session) return;
+  clearTimeout(session.fadeTimer);
+  session.fadeTimer = setTimeout(closeTabMenuWindowNow, Math.max(0, delay));
+}
+
+function createTabMenuWindow() {
+  // 背景色与菜单底色一致（白），避免首次显示白闪；transparent 关闭，圆角边框由窗口自身绘制。
+  const win = new BrowserWindow({
+    width: 224, height: 64,
+    frame: false, transparent: false, resizable: false, movable: false,
+    minimizable: false, maximizable: false, fullscreenable: false,
+    skipTaskbar: true, show: false, useContentSize: true,
+    backgroundColor: '#ffffff', title: '标签菜单',
+    webPreferences: {
+      preload: path.join(__dirname, 'tab-menu-preload.cjs'),
+      nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true,
+    },
+  });
+  win.setAlwaysOnTop(true, 'floating');
+  win.on('blur', () => startTabMenuDwell());
+  win.webContents.on('render-process-gone', () => { finishTabMenuSession(null); closeTabMenuWindowNow(); });
+  win.on('closed', () => {
+    if (tabMenuWindow === win) tabMenuWindow = null;
+    if (tabMenuSession && tabMenuSession.window === win) {
+      finishTabMenuSession(null);
+      tabMenuSession = null;
+    }
+  });
+  tabMenuWindow = win;
+  win.loadURL(`${localServerInfo.url}/tab-menu.html`).catch(error => logDiagnostic('tab-menu-load', error));
+  return win;
+}
+
+// 打开（或复用）菜单窗：Promise 解析为选中的动作 id；null = cancelled（blur/Esc 驻留到期、
+// creator 窗口关闭、渲染层崩溃、被下一次呼出覆盖）。
+function openTabMenuWindow({ owner, x, y, entries }) {
+  if (!localServerInfo) throw new Error('本地服务尚未就绪');
+  return new Promise(resolve => {
+    const reuse = tabMenuWindow && !tabMenuWindow.isDestroyed();
+    const win = reuse ? tabMenuWindow : createTabMenuWindow();
+    // 新呼出接管窗口：上一个会话的定时器与 owner 监听全部解除；还没回执（blur 驻留中、
+    // 或点选淡出中被再次呼出）按取消处理，与「驻留期内再次呼出＝不消失」诉求一致。
+    if (tabMenuSession) {
+      clearTimeout(tabMenuSession.dwellTimer);
+      clearTimeout(tabMenuSession.fadeTimer);
+      finishTabMenuSession(null);
+      if (tabMenuSession.owner && !tabMenuSession.owner.isDestroyed()) {
+        tabMenuSession.owner.removeListener('closed', tabMenuSession.onOwnerClosed);
+      }
+    }
+    const session = {
+      settled: false, finish: resolve, owner, window: win, x, y,
+      dwellTimer: 0, fadeTimer: 0,
+      onOwnerClosed: () => { finishTabMenuSession(null); closeTabMenuWindowNow(); },
+    };
+    tabMenuSession = session;
+    owner.once('closed', session.onOwnerClosed);
+    const deliver = () => {
+      if (win.isDestroyed()) return;
+      win.webContents.send('tab-menu:show', { items: entries });
+    };
+    if (reuse && !win.webContents.isLoading()) {
+      deliver();
+    } else {
+      // 首建（或页面还在加载）：did-finish-load 后再推条目
+      win.webContents.once('did-finish-load', deliver);
+      win.webContents.once('did-fail-load', () => { finishTabMenuSession(null); closeTabMenuWindowNow(); });
+    }
+  });
+}
+
+// 渲染层回报内容尺寸后定位：creator 窗口内容区坐标 → 屏幕坐标，再按显示器 workArea 钳制，
+// 保证菜单完整可见（距可用区边缘至少 8px，与 creator 页 DOM 菜单的贴边策略一致）。
+ipcMain.on('tab-menu:report-size', (event, payload = {}) => {
+  if (!isTrustedTabMenuSender(event)) return;
+  const session = tabMenuSession;
+  if (!session || session.window !== tabMenuWindow || tabMenuWindow.isDestroyed()) return;
+  const width = Math.max(160, Math.min(480, Math.round(Number(payload.width) || 224)));
+  const height = Math.max(48, Math.min(640, Math.round(Number(payload.height) || 64)));
+  tabMenuWindow.setContentSize(width, height);
+  const [outerWidth, outerHeight] = tabMenuWindow.getSize();
+  const ownerBounds = session.owner && !session.owner.isDestroyed()
+    ? session.owner.getContentBounds()
+    : { x: 0, y: 0 };
+  const desiredX = Math.round(ownerBounds.x + session.x);
+  const desiredY = Math.round(ownerBounds.y + session.y);
+  let finalX = desiredX;
+  let finalY = desiredY;
+  try {
+    const area = screen.getDisplayNearestPoint({ x: desiredX, y: desiredY }).workArea;
+    finalX = Math.max(area.x + 8, Math.min(desiredX, area.x + area.width - outerWidth - 8));
+    finalY = Math.max(area.y + 8, Math.min(desiredY, area.y + area.height - outerHeight - 8));
+  } catch (error) {
+    logDiagnostic('tab-menu-position', error);
+  }
+  tabMenuWindow.setPosition(finalX, finalY);
+  if (!tabMenuWindow.isVisible()) {
+    tabMenuWindow.show();
+    tabMenuWindow.focus();
+  }
+});
+
+ipcMain.on('tab-menu:pick', (event, payload = {}) => {
+  if (!isTrustedTabMenuSender(event)) return;
+  const session = tabMenuSession;
+  if (!session || session.window !== tabMenuWindow || session.settled) return;
+  const id = typeof payload.id === 'string' ? payload.id : '';
+  // 双保险：渲染层被攻破也只能回传白名单动作
+  if (!ALLOWED_TAB_MENU_ACTIONS.has(id)) return;
+  finishTabMenuSession(id);
+  // 点选不驻留：回执已发出，只等渲染层播完 120ms 淡出后 dismiss 收窗（这里留兜底定时）
+  scheduleTabMenuFadeClose(TAB_MENU_FADE_MS + 300);
+});
+
+ipcMain.on('tab-menu:dismiss', event => {
+  if (!isTrustedTabMenuSender(event)) return;
+  const session = tabMenuSession;
+  if (!session || session.window !== tabMenuWindow || tabMenuWindow.isDestroyed()) return;
+  if (session.settled) {
+    // 点选淡出完成后的收尾信号：立即关窗
+    clearTimeout(session.fadeTimer);
+    closeTabMenuWindowNow();
+    return;
+  }
+  // Esc：与 blur 同一条驻留路径，500ms 后才回执 cancelled
+  startTabMenuDwell();
+});
+
+// —— 标签菜单小窗 · 确定性自测钩子（VIDEO_OS_TAB_MENU_TEST=1 时启用）——
+// 真实走 creator:show-tab-menu IPC → 菜单小窗 → 点选/取消回执全链路，供 test_creator_context_menu.cjs 驱动。
+const sleepMs = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+async function waitForTabMenuReady(check, rounds = 80) {
+  for (let i = 0; i < rounds; i++) {
+    if (await check()) return true;
+    await sleepMs(50);
+  }
+  return await check();
+}
+
+async function waitForTabMenuItems() {
+  const read = async () => {
+    if (!tabMenuWindow || tabMenuWindow.isDestroyed()) return null;
+    return tabMenuWindow.webContents.executeJavaScript(
+      `[...document.querySelectorAll('.tab-context-item')].map(item => ({ id: item.dataset.action || '', disabled: item.disabled, danger: item.classList.contains('danger') }))`
+    ).catch(() => null);
+  };
+  for (let i = 0; i < 80; i++) {
+    const items = await read();
+    if (Array.isArray(items) && items.length) return items;
+    await sleepMs(50);
+  }
+  throw new Error('菜单小窗未在时限内渲染出条目');
+}
+
+// 从 creator 渲染层发起真实 invoke；结果落到 window.__tabMenuProbeLog（数组按回执顺序）
+async function invokeTabMenuFromCreator(items, x = 80, y = 60) {
+  return creatorWindow.webContents.executeJavaScript(`
+    window.__tabMenuProbeLog = [];
+    window.creatorAPI.showTabContextMenu({ x: ${Number(x)}, y: ${Number(y)}, items: ${JSON.stringify(items)} })
+      .then(result => { window.__tabMenuProbeLog.push(result); },
+            error => { window.__tabMenuProbeLog.push({ invokeError: String(error && error.message || error) }); });
+    'invoked'
+  `);
+}
+
+async function readTabMenuProbes() {
+  return creatorWindow.webContents.executeJavaScript('window.__tabMenuProbeLog || []');
+}
+
+async function runTabMenuSelfTest() {
+  for (let i = 0; i < 100 && (!creatorWindow || creatorWindow.isDestroyed()); i++) await sleepMs(50);
+  if (!creatorWindow || creatorWindow.isDestroyed()) throw new Error('创作窗口未就绪');
+  const health = {};
+  const menuAlive = () => !!tabMenuWindow && !tabMenuWindow.isDestroyed() && tabMenuWindow.isVisible();
+
+  // ① 白名单过滤 + 定位钳制 + 点选回执：非白名单 id / 空 id 不渲染，窗口完整落在 workArea 内
+  await invokeTabMenuFromCreator([
+    { id: 'pin', label: '固定标签' },
+    { id: 'evil-action', label: '不该出现' },
+    { id: '', label: '空id' },
+    { separator: true },
+    { id: 'close', label: '关闭标签' },
+  ]);
+  let items = await waitForTabMenuItems();
+  if (items.some(item => item.id === 'evil-action' || item.id === '')) throw new Error(`白名单外条目被渲染：${JSON.stringify(items)}`);
+  if (!items.some(item => item.id === 'pin') || !items.some(item => item.id === 'close')) throw new Error(`白名单内条目丢失：${JSON.stringify(items)}`);
+  const bounds = tabMenuWindow.getBounds();
+  const area = screen.getDisplayNearestPoint({ x: bounds.x, y: bounds.y }).workArea;
+  if (bounds.x < area.x || bounds.y < area.y
+    || bounds.x + bounds.width > area.x + area.width + 1
+    || bounds.y + bounds.height > area.y + area.height + 1) {
+    throw new Error(`菜单窗越出显示器可用区：${JSON.stringify({ bounds, area })}`);
+  }
+  health.filterAndPosition = 'pass';
+  await tabMenuWindow.webContents.executeJavaScript(`document.querySelector('[data-action="pin"]')?.click()`);
+  if (!await waitForTabMenuReady(async () => (await readTabMenuProbes()).some(r => r && r.action === 'pin'))) {
+    throw new Error(`点选回执缺失：${JSON.stringify(await readTabMenuProbes())}`);
+  }
+  health.pickReceipt = 'pass';
+  if (!await waitForTabMenuReady(async () => !menuAlive())) throw new Error('点选后菜单窗未在时限内关闭');
+  await sleepMs(50);
+
+  // ② 禁用项 + Esc 驻留：点禁用项无回执，Esc 不立即关窗，驻留 500ms 后回执 cancelled
+  await invokeTabMenuFromCreator([
+    { id: 'close-left', label: '关闭左侧标签', enabled: false },
+    { id: 'close', label: '关闭标签' },
+  ]);
+  items = await waitForTabMenuItems();
+  const disabledItem = items.find(item => item.id === 'close-left');
+  if (!disabledItem || disabledItem.disabled !== true) throw new Error(`禁用态未渲染：${JSON.stringify(items)}`);
+  await tabMenuWindow.webContents.executeJavaScript(`document.querySelector('[data-action="close-left"]')?.click()`);
+  await sleepMs(200);
+  if ((await readTabMenuProbes()).length) throw new Error('禁用项点击产生了回执');
+  await tabMenuWindow.webContents.executeJavaScript(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
+  await sleepMs(150);
+  if (!menuAlive()) throw new Error('Esc 后未驻留：菜单窗被立即关闭');
+  if (!await waitForTabMenuReady(async () => !menuAlive())) throw new Error('Esc 驻留后菜单窗未关闭');
+  const escProbes = await readTabMenuProbes();
+  if (!escProbes.length || escProbes[0].cancelled !== true) throw new Error(`Esc 回执不是 cancelled：${JSON.stringify(escProbes)}`);
+  health.escDwell = 'pass';
+
+  // ③ 驻留期内再次呼出＝取消消失、原地换内容：首个会话回执 cancelled，新菜单条目可点选
+  await invokeTabMenuFromCreator([{ id: 'pin', label: '固定标签' }]);
+  await waitForTabMenuItems();
+  await tabMenuWindow.webContents.executeJavaScript(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
+  await sleepMs(100);
+  await invokeTabMenuFromCreator([{ id: 'close', label: '关闭标签' }]);
+  await waitForTabMenuItems();
+  await tabMenuWindow.webContents.executeJavaScript(`document.querySelector('[data-action="close"]')?.click()`);
+  if (!await waitForTabMenuReady(async () => {
+    const probes = await readTabMenuProbes();
+    return probes.length >= 2 && probes[0].cancelled === true && probes[1] && probes[1].action === 'close';
+  })) {
+    throw new Error(`重呼会话回执异常：${JSON.stringify(await readTabMenuProbes())}`);
+  }
+  health.recallDuringDwell = 'pass';
+
+  // ④ blur 驻留：点击窗口外（blur）不立即消失，500ms 后回执 cancelled（与 Esc 同一条驻留路径）
+  await invokeTabMenuFromCreator([{ id: 'pin', label: '固定标签' }]);
+  await waitForTabMenuItems();
+  tabMenuWindow.emit('blur');
+  await sleepMs(150);
+  if (!menuAlive()) throw new Error('blur 后未驻留：菜单窗被立即关闭');
+  if (!await waitForTabMenuReady(async () => !menuAlive())) throw new Error('blur 驻留后菜单窗未关闭');
+  const blurProbes = await readTabMenuProbes();
+  if (!blurProbes.length || blurProbes[0].cancelled !== true) throw new Error(`blur 回执不是 cancelled：${JSON.stringify(blurProbes)}`);
+  health.blurDwell = 'pass';
+
+  // ⑤ 边缘坐标钳制：请求点远超屏幕时菜单必须被拉回 workArea 内且仍可点选
+  await invokeTabMenuFromCreator([{ id: 'restore', label: '重新打开关闭的标签', accelerator: 'CmdOrCtrl+Shift+T' }], 4000, 2400);
+  items = await waitForTabMenuItems();
+  const edgeBounds = tabMenuWindow.getBounds();
+  const edgeArea = screen.getDisplayNearestPoint({ x: edgeBounds.x, y: edgeBounds.y }).workArea;
+  if (edgeBounds.x < edgeArea.x || edgeBounds.y < edgeArea.y
+    || edgeBounds.x + edgeBounds.width > edgeArea.x + edgeArea.width + 1
+    || edgeBounds.y + edgeBounds.height > edgeArea.y + edgeArea.height + 1) {
+    throw new Error(`边缘请求未被钳制进可用区：${JSON.stringify({ edgeBounds, edgeArea })}`);
+  }
+  await tabMenuWindow.webContents.executeJavaScript(`document.querySelector('[data-action="restore"]')?.click()`);
+  if (!await waitForTabMenuReady(async () => (await readTabMenuProbes()).some(r => r && r.action === 'restore'))) {
+    throw new Error('钳制后的菜单点选无回执');
+  }
+  health.edgeClamp = 'pass';
+
+  console.log(`TAB_MENU_IPC_PASS ${JSON.stringify(health)}`);
+  app.quit();
 }
 
 // —— 单视频置顶浮窗（创作浏览器左栏右键 → 浮到最顶层 → 从浮窗原生拖进剪映）——
@@ -2025,6 +2481,8 @@ function floatVideoPublicInfo(asset) {
     projectId: project.id,
     projectName: project.name || '',
     size: Number(asset.size) || 0,
+    disposition: VideoDisposition.of({ path: rel }),
+    presentation: floatVideoWindow?.__floatVideoRecord?.presentation?.render || null,
     fileUrl: `${localServerInfo.url}/api/creative-assets/file?project=${encodeURIComponent(project.id)}&p=${encodeURIComponent(rel)}`,
   };
 }
@@ -2088,7 +2546,28 @@ function closeFloatVideoWindow(reason = 'closed') {
   return true;
 }
 
-function createFloatVideoWindow(asset) {
+function floatVideoSourceRect(payload) {
+  const raw = payload?.origin;
+  if (!raw || !creatorWindow || creatorWindow.isDestroyed()) return null;
+  if (!['x', 'y', 'width', 'height'].every(key => Number.isFinite(raw[key]))) return null;
+  const owner = creatorWindow.getContentBounds(), zoom = creatorWindow.webContents.getZoomFactor();
+  const x = Math.max(0, raw.x * zoom), y = Math.max(0, raw.y * zoom);
+  const width = Math.min(raw.width * zoom, owner.width - x), height = Math.min(raw.height * zoom, owner.height - y);
+  if (width < 1 || height < 1) return null;
+  return { x: Math.round(owner.x + x), y: Math.round(owner.y + y), width: Math.round(width), height: Math.round(height) };
+}
+
+function settleFloatVideoPresentation(win, id) {
+  const record = win?.__floatVideoRecord, presentation = record?.presentation;
+  if (!win || win.isDestroyed() || !presentation || (id && id !== presentation.render.id)) return;
+  clearTimeout(record.presentationTimer);
+  record.presentation = null;
+  win.setBounds(presentation.target, false);
+  win.setMaximumSize(760, 900);
+  if (!win.webContents.isDestroyed()) win.webContents.send('float-video:settled', { id: presentation.render.id });
+}
+
+function createFloatVideoWindow(asset, payload) {
   if (!localServerInfo) throw new Error('本地服务尚未就绪');
   const project = creativeProjectStore.active();
   let saved = {};
@@ -2096,14 +2575,15 @@ function createFloatVideoWindow(asset) {
   const bounds = Number.isFinite(saved.x) && Number.isFinite(saved.y)
     ? clampFloatVideoBounds({ x: saved.x, y: saved.y, width: saved.width, height: saved.height })
     : defaultFloatVideoBounds();
+  const presentation = createFloatPresentation(bounds, floatVideoSourceRect(payload), `float-${Date.now()}`);
   const win = new BrowserWindow({
-    ...bounds,
+    ...presentation.bounds,
     minWidth: FLOAT_VIDEO_SIZE.minWidth, minHeight: FLOAT_VIDEO_SIZE.minHeight,
-    maxWidth: 760, maxHeight: 900,
     title: '置顶视频浮窗',
     frame: false, show: false, alwaysOnTop: true, fullscreenable: false,
     minimizable: false, maximizable: false, skipTaskbar: true,
-    backgroundColor: '#131317',
+    transparent: true, backgroundColor: '#00000000', hasShadow: false,
+    ...(process.platform === 'darwin' ? { type: 'panel', focusable: false } : {}),
     webPreferences: {
       preload: path.join(__dirname, 'float-video-preload.cjs'),
       nodeIntegration: false, contextIsolation: true, sandbox: true,
@@ -2113,6 +2593,7 @@ function createFloatVideoWindow(asset) {
   const record = {
     info: { path: asset.path, projectId: project ? project.id : '', name: path.basename(asset.path) },
     reason: 'closed',
+    presentation,
   };
   win.__floatVideoRecord = record;
   floatVideoWindow = win;
@@ -2127,13 +2608,15 @@ function createFloatVideoWindow(asset) {
     clearTimeout(saveBoundsTimer);
     saveBoundsTimer = setTimeout(() => {
       if (win.isDestroyed()) return;
+      if (record.presentation) return;
       try { fs.writeFileSync(floatVideoBoundsFile(), JSON.stringify(win.getBounds())); } catch {}
     }, 300);
   };
-  win.on('moved', saveBounds);
+  win.on('move', saveBounds);
   win.on('resize', saveBounds);
   win.on('closed', () => {
     clearTimeout(saveBoundsTimer);
+    clearTimeout(record.presentationTimer);
     if (floatVideoWindow === win) {
       floatVideoWindow = null;
       floatVideoState = null;
@@ -2144,9 +2627,13 @@ function createFloatVideoWindow(asset) {
   win.once('ready-to-show', () => {
     // 显示后再钉一次：macOS 可能在 show 时丢掉「所有空间可见」或 floating 级别。
     // 不抢创作面板焦点：右键时左栏可能正在做内联编辑，showInactive 与联动窗同一策略。
-    if (win.isDestroyed()) return;
-    pinFloatVideoWindow(win);
-    bringFloatVideoForward();
+    if (win.isDestroyed() || !record.presentation || record.presented) return;
+    // 渲染层先摆在来源卡片的位置，绘制完成后再显示并播放，避免暗框闪一下。
+    record.presentationTimer = setTimeout(() => {
+      if (win.isDestroyed() || win !== floatVideoWindow) return;
+      settleFloatVideoPresentation(win);
+      bringFloatVideoForward();
+    }, 2000);
   });
   return win;
 }
@@ -2164,7 +2651,16 @@ function openFloatVideoWindow(payload) {
     if (sameFile) {
       // 已拖出收起的窗口再次浮出，开启新一轮关闭/还原通知。
       if (floatVideoWindow.__floatVideoRecord) floatVideoWindow.__floatVideoRecord.notified = false;
-      bringFloatVideoForward();
+      if (!floatVideoWindow.isVisible()) {
+        const win = floatVideoWindow, record = win.__floatVideoRecord;
+        settleFloatVideoPresentation(win);
+        record.presentation = createFloatPresentation(clampFloatVideoBounds(win.getBounds()), floatVideoSourceRect(payload), `float-${Date.now()}`);
+        record.presented = false;
+        win.setMaximumSize(12000, 12000);
+        win.setBounds(record.presentation.bounds, false);
+        win.webContents.send('float-video:prepare', record.presentation.render);
+        record.presentationTimer = setTimeout(() => { if (!win.isDestroyed()) { settleFloatVideoPresentation(win); bringFloatVideoForward(); } }, 2000);
+      } else bringFloatVideoForward();
       return { ok: true, path: asset.path, reused: true };
     }
     // 换文件：旧窗关闭会通知 creator 还原旧卡片，随后左栏只保留新卡片处于浮窗态。
@@ -2173,11 +2669,92 @@ function openFloatVideoWindow(payload) {
     floatVideoWindow = null;
     floatVideoState = null;
   }
-  createFloatVideoWindow(asset);
+  createFloatVideoWindow(asset, payload);
   return { ok: true, path: asset.path, reused: false };
 }
 
 function registerIpc() {
+  downloadReviewUI = createDownloadReviewUI({ BrowserWindow, ipcMain,
+    parent: () => creatorWindow, url: () => `${localServerInfo.url}/assets/ui/download-review.html`,
+    preload: path.join(__dirname, 'download-review-preload.cjs'),
+    onError: error => logDiagnostic('video-download-choice', error),
+  });
+  ipcMain.handle('asset:folder-menu', async (event, payload = {}) => {
+    if (!isTrustedCreatorSender(event) && !isTrustedAssetSender(event)) throw new Error('拒绝未经授权的文件夹操作');
+    const owner = creatorWindow;
+    const project = creativeProjectStore.active();
+    const relative = String(payload.path || '').replace(/\\/g, '/');
+    if (!project || !relative.startsWith(`${project.folder}/`)) throw new Error('不能删除整个剧本，请选择具体文件夹');
+    const entry = resolveCreativeAsset(CREATIVE_ASSET_DIR, relative, 'folder');
+    if (!entry || !owner || owner.isDestroyed()) throw new Error('文件夹不存在');
+    const zoom = event.sender.getZoomFactor();
+    const bounds = isTrustedAssetSender(event) ? assetView.getBounds() : { x: 0, y: 0 };
+    const chosen = await new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = value => { if (settled) return; settled = true; owner.removeListener('closed', onClosed); resolve(value); };
+      const onClosed = () => finish(null);
+      owner.once('closed', onClosed);
+      try {
+        Menu.buildFromTemplate([
+          { label: '改名…', enabled: relative !== project.categories.find(item => item.id === 'browser-downloads')?.path, click: () => finish('rename') },
+          { label: '在文件夹中显示', click: () => finish('reveal') },
+          { type: 'separator' },
+          { label: `删除文件夹「${path.basename(entry.abs)}」…`, click: () => finish('delete') },
+        ]).popup({ window: owner,
+          x: Math.max(0, Math.round((Number(payload.x) || 0) * zoom + bounds.x)),
+          y: Math.max(0, Math.round((Number(payload.y) || 0) * zoom + bounds.y)),
+          callback: () => setImmediate(() => finish(null)),
+        });
+      } catch (error) { owner.removeListener('closed', onClosed); reject(error); }
+    });
+    if (!chosen || owner.isDestroyed()) return { cancelled: true };
+    if (chosen === 'reveal') { shell.showItemInFolder(entry.abs); return { revealed: true }; }
+    if (chosen === 'rename') return { rename: true, path: relative, name: path.basename(entry.abs), projectId: project.id };
+    const { response } = await dialog.showMessageBox(owner, {
+      type: 'warning', title: '删除文件夹', message: `删除「${path.basename(entry.abs)}」及其中的全部内容？`,
+      detail: '文件夹将移入系统废纸篓。删除后，资产列表和数量会同步更新；可以从废纸篓恢复。',
+      buttons: ['取消', '删除文件夹'], defaultId: 0, cancelId: 0, noLink: true,
+    });
+    if (response !== 1 || owner.isDestroyed()) return { cancelled: true };
+    if (creativeProjectStore.active()?.id !== project.id) throw new Error('剧本已切换，未删除原文件夹');
+    const current = resolveCreativeAsset(CREATIVE_ASSET_DIR, relative, 'folder');
+    if (!current || current.abs !== entry.abs) throw new Error('文件夹已变更，未执行删除');
+    const videoRoot = project.categories.find(item => item.id === 'generated-videos')?.path;
+    const containsActiveDownload = [...activeDownloadItems.values()].some(({ record }) =>
+      (record.savePath && pathIsInside(entry.abs, record.savePath)) ||
+      (record.pendingReview && record.productionSnapshot?.projectId === project.id && (relative === videoRoot || relative.startsWith(`${videoRoot}/`))));
+    if (containsActiveDownload) throw new Error('这个文件夹仍有下载任务，请完成或取消后再删除');
+    const result = await creativeProjectStore.deleteFolder(project.id, relative, absolute => shell.trashItem(absolute));
+    if (floatVideoState?.path.startsWith(`${relative}/`)) closeFloatVideoWindow('folder-deleted');
+    serverModule.broadcastCreativeAssets?.();
+    return { ...result, deleted: true };
+  });
+  ipcMain.handle('asset:rename-folder', (event, payload = {}) => {
+    if (!isTrustedCreatorSender(event) && !isTrustedAssetSender(event)) throw new Error('拒绝未经授权的文件夹操作');
+    const project = creativeProjectStore.active();
+    if (!project || project.id !== payload.projectId) throw new Error('剧本已切换，请重新选择文件夹');
+    const relative = String(payload.path || '');
+    if (!relative.startsWith(`${project.folder}/`)) throw new Error('只能修改当前剧本内的文件夹');
+    const entry = resolveCreativeAsset(CREATIVE_ASSET_DIR, relative, 'folder');
+    if (!entry) throw new Error('文件夹不存在');
+    const videos = project.categories.find(item => item.id === 'generated-videos')?.path;
+    if ([...activeDownloadItems.values()].some(({ record }) =>
+      (record.savePath && pathIsInside(entry.abs, record.savePath)) ||
+      (record.pendingReview && record.productionSnapshot?.projectId === project.id && relative === videos))) {
+      throw new Error('这个文件夹仍有下载任务，请完成或取消后再改名');
+    }
+    const result = serverModule.renameCreativeFolder(project.id, relative, payload.name);
+    const target = path.join(CREATIVE_ASSET_DIR, ...result.path.split('/'));
+    for (const record of recentDownloads) {
+      if (record.savePath && pathIsInside(entry.abs, record.savePath)) {
+        record.savePath = path.join(target, path.relative(entry.abs, record.savePath));
+        broadcastDownload(record);
+      }
+    }
+    if (floatVideoState?.path.startsWith(`${relative}/`)) closeFloatVideoWindow('folder-renamed');
+    serverModule.broadcastCreativeAssets?.({ folderRename: result });
+    return result;
+  });
   ipcMain.handle('creator:automation', (event, request = {}) => {
     requireTrusted(event, 'media');
     if (!creatorAutomation) throw new Error('自动化接口正在启动');
@@ -2393,7 +2970,7 @@ function registerIpc() {
 
   ipcMain.handle('creator:clear-tabs', event => {
     requireTrusted(event, 'creator');
-    return clearBrowserTabs();
+    return confirmClearBrowserTabs();
   });
 
   ipcMain.handle('creator:set-browser-bounds', (event, bounds = {}) => {
@@ -2561,6 +3138,7 @@ function registerIpc() {
   ipcMain.handle('creator:open-download', async (event, downloadId) => {
     requireTrusted(event, 'creator');
     const id = String(downloadId || '');
+    if (recentDownloads.find(record => record.id === id)?.pendingReview) return false;
     let savePath = recentDownloads.find(item => item.id === id)?.savePath || '';
     if (!savePath && productionStore) {
       const row = productionStore.listInbox({ limit: 200, includeDismissed: true })
@@ -2581,10 +3159,28 @@ function registerIpc() {
     return true;
   });
 
-  ipcMain.handle('creator:download-action', (event, payload = {}) => {
+  ipcMain.handle('creator:download-action', async (event, payload = {}) => {
     requireTrusted(event, 'creator');
     const action = String(payload.action || '');
     const transfer = activeDownloadItems.get(String(payload.downloadId || ''));
+    if (transfer?.record.pendingReview && (!transfer.item || transfer.finished)) {
+      const record = transfer.record;
+      if (record.reviewBusy) return false;
+      record.reviewBusy = true;
+      try {
+        if (action === 'cancel') {
+          downloadReviewUI?.cancel(record.id);
+          await videoDownloadReview.discard(record.id);
+          activeDownloadItems.delete(record.id); record.state = 'cancelled'; record.pendingReview = false; record.savePath = '';
+          broadcastDownload(record); return true;
+        }
+        if (action !== 'resume') return false;
+        const entry = videoDownloadReview.list().find(item => item.id === record.id);
+        const choice = entry?.choice || await chooseVideoDownload(record);
+        if (['editable', 'processing'].includes(choice)) { await finishReviewedVideo(record); return true; }
+        return false;
+      } finally { record.reviewBusy = false; }
+    }
     const item = transfer?.item;
     if (!item || !ALLOWED_DOWNLOAD_ACTIONS.has(action)) return false;
     if (action === 'pause' && !item.isPaused()) item.pause();
@@ -2666,14 +3262,61 @@ function registerIpc() {
     return createCreatorWindow({ mode, projectId: selection.projectId });
   });
 
+  ipcMain.handle('creator:select-project', (event, payload = {}) => {
+    requireTrusted(event, 'creator');
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('剧本参数无效');
+    const project = creativeProjectStore.list().find(item => item.id === payload.projectId && item.available !== false);
+    if (!project) throw new Error('剧本不存在或目录不可用');
+    return createCreatorWindow({ mode: modeOrDefault(payload.mode), projectId: project.id });
+  });
+
+  // HTML 剧本列表接收逐项右键；真正的上下文菜单仍用原生 Menu，避免被网页视图盖住。
+  // 主进程只返回用户选择的目标，模板由同源存储一次追加提交，不替换草稿或历史。
+  ipcMain.handle('creator:show-project-template-menu', async (event, payload = {}) => {
+    requireTrusted(event, 'creator');
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('迁移菜单参数无效');
+    const projects = creativeProjectStore.list();
+    const source = projects.find(item => item.id === payload.sourceProjectId && item.available !== false);
+    if (!source) throw new Error('来源剧本不存在或目录不可用');
+    const targets = projects.filter(item => item.id !== source.id && item.available !== false);
+    const owner = creatorWindow;
+    if (!owner || owner.isDestroyed()) return { cancelled: true };
+    const count = mode => Number.isSafeInteger(payload.counts?.[mode]) && payload.counts[mode] >= 0 ? payload.counts[mode] : 0;
+    const zoom = event.sender.getZoomFactor(), [width, height] = owner.getContentSize();
+    const x = Number.isFinite(payload.x) ? Math.max(0, Math.min(width - 1, Math.round(payload.x * zoom))) : 0;
+    const y = Number.isFinite(payload.y) ? Math.max(0, Math.min(height - 1, Math.round(payload.y * zoom))) : 74;
+    const selected = await new Promise((resolve, reject) => {
+      let settled = false;
+      const onClosed = () => finish(null);
+      const finish = value => {
+        if (settled) return; settled = true;
+        owner.removeListener('closed', onClosed); resolve(value);
+      };
+      owner.once('closed', onClosed);
+      try {
+        Menu.buildFromTemplate([
+          { label: `「${source.name}」：图片 ${count('image')} 条 · 视频 ${count('video')} 条`, enabled: false },
+          { type: 'separator' },
+          { label: '迁移固定提示词到…', enabled: targets.length > 0 && count('image') + count('video') > 0,
+            submenu: targets.map(target => ({ label: target.name, click: () => finish(target.id) })) },
+        ]).popup({ window: owner, x, y, callback: () => setImmediate(() => finish(null)) });
+      } catch (error) { owner.removeListener('closed', onClosed); reject(error); }
+    });
+    if (!selected || owner.isDestroyed()) return { cancelled: true };
+    const target = creativeProjectStore.list().find(item => item.id === selected && item.available !== false);
+    if (!target) throw new Error('目标剧本已不可用，未执行迁移');
+    return { targetProjectId: target.id, targetName: target.name };
+  });
+
   ipcMain.handle('creator:show-project-picker', async (event, mode) => {
     requireTrusted(event, 'creator');
     await createMainWindow(mode);
     return true;
   });
 
-  // 标签右键菜单用系统原生 Menu.popup：DOM 浮层会被上层 WebContentsView 内嵌网页盖住，
-  // 原生菜单由操作系统绘制，永远显示在最上层。渲染端只传条目描述与弹出坐标。
+  // 标签右键菜单：原生 Menu.popup 的消失时机由操作系统控制，做不了「消失前驻留 500ms」，
+  // 桌面端改用无边框菜单小窗（与剪映联动窗同款架构，见 openTabMenuWindow）。
+  // 渲染端契约不变：invoke 传 { x, y, items }，返回 { action: '<id>' } 或 { cancelled: true }。
   ipcMain.handle('creator:show-tab-menu', async (event, payload = {}) => {
     requireTrusted(event, 'creator');
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('标签菜单参数无效');
@@ -2688,7 +3331,7 @@ function registerIpc() {
     for (const raw of rawItems) {
       if (!raw || typeof raw !== 'object') continue;
       if (raw.separator) {
-        // 连续分隔线与首尾多余分隔线都收掉，保持原生菜单干净。
+        // 连续分隔线与首尾多余分隔线都收掉，保持菜单干净。
         if (entries.length && !entries[entries.length - 1].separator) entries.push({ separator: true });
         continue;
       }
@@ -2700,38 +3343,13 @@ function registerIpc() {
         id,
         label,
         enabled: raw.enabled !== false,
+        danger: TAB_MENU_DANGER_ACTIONS.has(id),
         accelerator: typeof raw.accelerator === 'string' && raw.accelerator.length <= 40 ? raw.accelerator : '',
       });
     }
     while (entries.length && entries[entries.length - 1].separator) entries.pop();
     if (!entries.some(item => !item.separator)) return { cancelled: true };
-    const action = await new Promise((resolve, reject) => {
-      let settled = false;
-      const finish = value => {
-        if (settled) return;
-        settled = true;
-        owner.removeListener('closed', onClosed);
-        resolve(value);
-      };
-      const onClosed = () => finish(null);
-      owner.once('closed', onClosed);
-      try {
-        const menu = Menu.buildFromTemplate(entries.map(item => item.separator ? { type: 'separator' } : {
-          label: item.label,
-          enabled: item.enabled,
-          ...(item.accelerator ? { accelerator: item.accelerator, registerAccelerator: false } : {}),
-          click: () => finish(item.id),
-        }));
-        menu.popup({
-          window: owner, x, y,
-          // Let the selected item's click arrive before treating dismissal as cancel.
-          callback: () => setImmediate(() => finish(null)),
-        });
-      } catch (error) {
-        owner.removeListener('closed', onClosed);
-        reject(error);
-      }
-    });
+    const action = await openTabMenuWindow({ owner, x, y, entries });
     if (!action) return { cancelled: true };
     return { action };
   });
@@ -2757,6 +3375,21 @@ function registerIpc() {
     };
   });
 
+  ipcMain.handle('creator:export-audio', async (event, payload = {}) => {
+    requireTrusted(event, 'media');
+    const asset = requireCreativeAsset(payload.path, 'audio');
+    const result = await dialog.showSaveDialog(BrowserWindow.fromWebContents(event.sender) || creatorWindow || mainWindow, {
+      title: '另存人物音频',
+      defaultPath: path.join(app.getPath('downloads'), path.basename(asset.absolutePath)),
+      filters: [{ name: 'WAV 音频', extensions: ['wav'] }],
+    });
+    if (result.canceled || !result.filePath) return { canceled: true };
+    if (path.resolve(result.filePath) !== path.resolve(asset.absolutePath)) {
+      await fs.promises.copyFile(asset.absolutePath, result.filePath);
+    }
+    return { canceled: false };
+  });
+
   ipcMain.handle('asset:pick-source-folder', async event => {
     requireTrusted(event, 'asset');
     const result = await dialog.showOpenDialog(creatorWindow || mainWindow, {
@@ -2780,6 +3413,7 @@ function registerIpc() {
       if (!requested.length) throw new Error('缺少资产路径');
       if (requested.length > 100) throw new Error('一次最多拖拽 100 个文件');
       const absolutePaths = requested.map(rel => {
+        if (kind === 'tray' && VideoDisposition.of({ path: rel }) === 'processing') throw new Error('待处理视频请先处理，再移入可剪辑文件夹');
         const absolutePath = resolveDragAbsolute(rel);
         if (fs.statSync(absolutePath).size > 20 * 1024 * 1024 * 1024) throw new Error(`${rel} 超过 20 GB，拒绝直接拖拽`);
         return absolutePath;
@@ -2841,6 +3475,22 @@ function registerIpc() {
     }
     return floatVideoPublicInfo(asset);
   });
+  ipcMain.on('float-video:ready', (event, id) => {
+    requireTrusted(event, 'float');
+    const win = floatVideoWindow, record = win?.__floatVideoRecord;
+    if (!record?.presentation || record.presentation.render.id !== id) return;
+    clearTimeout(record.presentationTimer);
+    record.presented = true;
+    pinFloatVideoWindow(win);
+    bringFloatVideoForward();
+    win.webContents.send('float-video:present', { id });
+    // 渲染器失去回执也会自动收敛，包络窗口不会留在屏幕上。
+    record.presentationTimer = setTimeout(() => settleFloatVideoPresentation(win, id), 700);
+  });
+  ipcMain.on('float-video:settle', (event, id) => {
+    requireTrusted(event, 'float');
+    settleFloatVideoPresentation(floatVideoWindow, id);
+  });
   // 原生拖出：与剪映联动窗同一条 webContents.startDrag 路线；只允许浮窗当前那一个视频，
   // 且在此刻再校验一次「当前剧本 + 真实视频文件」，杜绝把旧剧本或别的素材拖进剪映。
   ipcMain.on('float:start-asset-drag', (event, payload = {}) => {
@@ -2853,6 +3503,7 @@ function registerIpc() {
       if (!floatVideoState) throw new Error('浮窗已关闭');
       if (requested !== floatVideoState.path) throw new Error('浮窗只能拖出当前置顶的视频');
       const { absolutePath } = requireFloatVideoAsset(requested);
+      settleFloatVideoPresentation(win);
       event.sender.startDrag({ file: absolutePath, icon: dragIconFor(absolutePath) });
       if (!event.sender.isDestroyed()) event.sender.send(resultChannel, { ok: true, path: requested, count: 1 });
       dismissFloatVideoAfterDrag(win);
@@ -2870,6 +3521,7 @@ function registerIpc() {
     requireTrusted(event, 'float');
     const win = BrowserWindow.fromWebContents(event.sender);
     if (!win || win.isDestroyed() || win !== floatVideoWindow) return;
+    settleFloatVideoPresentation(win);
     const dx = Math.round(Number(payload.dx) || 0);
     const dy = Math.round(Number(payload.dy) || 0);
     if (!dx && !dy) return;
@@ -3090,6 +3742,12 @@ if (!gotSingleInstanceLock) {
       if (!registered) logDiagnostic('global-shortcut', 'Alt+Shift+D 注册失败：快捷键可能被其他应用占用');
     } catch (error) { logDiagnostic('global-shortcut', error); }
     app.on('will-quit', () => { try { globalShortcut.unregisterAll(); } catch {} });
+    if (process.env.VIDEO_OS_TAB_MENU_TEST === '1') {
+      runTabMenuSelfTest().catch(error => {
+        console.error(`TAB_MENU_IPC_FAIL ${error.stack || error}`);
+        app.quit();
+      });
+    }
     if (SMOKE_TEST) {
       setTimeout(async () => {
         try {
@@ -3700,6 +4358,8 @@ app.on('activate', () => {
 });
 
 app.on('before-quit', () => {
+  appQuitting = true;
+  downloadReviewUI?.stop();
   persistBrowserSession();
   creatorAutomationServer?.close();
   if (serverModule.server.listening) serverModule.server.close();

@@ -28,13 +28,69 @@ function fmtDate(iso) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+/* ---------- 动效：表面退出与开关回弹 ---------- */
+// 退出动画统一收口：立即或 reduced-motion 时直接补 hidden，否则加 is-closing 并用兜底定时保证最终隐藏（兜底 = 动画时长 + 80ms）。
+const surfaceCloseTimers = new WeakMap();
+
+function hideSurface(el, fallbackDelay, immediate = false) {
+  clearTimeout(surfaceCloseTimers.get(el));
+  surfaceCloseTimers.delete(el);
+  if (immediate || matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    el.classList.remove('is-closing');
+    el.classList.add('hidden');
+    return;
+  }
+  el.classList.add('is-closing');
+  surfaceCloseTimers.set(el, setTimeout(() => {
+    surfaceCloseTimers.delete(el);
+    el.classList.remove('is-closing');
+    el.classList.add('hidden');
+  }, fallbackDelay));
+}
+
+// 打开前掐掉在途退出：快速关-开时防止兜底定时把刚显示的表面又藏回去。
+function cancelSurfaceHide(el) {
+  clearTimeout(surfaceCloseTimers.get(el));
+  surfaceCloseTimers.delete(el);
+  el.classList.remove('is-closing');
+}
+
+// 开关回弹：动画结束与兜底定时先到先清；重复点击先拆旧监听再强制重排重启动画。
+const motionTickStates = new WeakMap();
+
+function playMotionTick(el) {
+  const prev = motionTickStates.get(el);
+  if (prev) {
+    clearTimeout(prev.timer);
+    el.removeEventListener('animationend', prev.onEnd);
+  }
+  el.classList.remove('motion-tick');
+  void el.offsetWidth;
+  el.classList.add('motion-tick');
+  const state = {};
+  const finish = () => {
+    clearTimeout(state.timer);
+    el.removeEventListener('animationend', state.onEnd);
+    el.classList.remove('motion-tick');
+    motionTickStates.delete(el);
+  };
+  state.onEnd = event => {
+    if (event.target !== el || event.animationName !== 'motionTick') return;
+    finish();
+  };
+  state.timer = setTimeout(finish, 400);
+  motionTickStates.set(el, state);
+}
+
 let toastTimer;
 function toast(msg) {
   const el = $('#toast');
   el.textContent = msg;
+  cancelSurfaceHide(el);
   el.classList.remove('hidden');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.add('hidden'), 1800);
+  // 1800 是业务展示时长；退出动画走 150ms 兜底，不改变前者。
+  toastTimer = setTimeout(() => hideSurface(el, 150), 1800);
 }
 
 async function copyText(text) {
@@ -241,11 +297,10 @@ function fmtDur(seconds) {
 function sortAssets(files, mode) {
   const sorted = [...files];
   sorted.sort((a, b) => {
-    if (mode === 'oldest') return a.mtime.localeCompare(b.mtime);
     if (mode === 'name') return a.name.localeCompare(b.name, 'zh-CN');
     if (mode === 'size') return b.size - a.size || a.name.localeCompare(b.name, 'zh-CN');
-    if (mode === 'folder') return parentFolderOf(a.displayPath || a.path).localeCompare(parentFolderOf(b.displayPath || b.path), 'zh-CN') || a.name.localeCompare(b.name, 'zh-CN');
-    return b.mtime.localeCompare(a.mtime);
+    if (mode === 'folder') return AssetOrder.compareFolderPaths(parentFolderOf(a.displayPath || a.path), parentFolderOf(b.displayPath || b.path)) || AssetOrder.newestFirst(a, b);
+    return AssetOrder.newestFirst(a, b);
   });
   return sorted;
 }
@@ -688,7 +743,8 @@ Object.assign(WM, {
     if (pageSubtitle) pageSubtitle.textContent = win.app.subtitle || '本机制作数据与项目文件实时同步';
     this.updateDock();
     this.saveLayout();
-    closeSidebar();
+    // 程序化导航路径瞬时收起，不带退出动画；用户手势路径（菜单/背板）才动画。
+    closeSidebar({ immediate: true });
     requestAnimationFrame(() => win.el.focus({ preventScroll: true }));
   },
   close(appId) {
@@ -904,8 +960,7 @@ const AssetsApp = {
           .map(([t, n]) => h('option', { value: t, selected: S.tag === t ? 'selected' : null }, `${t} (${n})`)),
       ),
       h('select', { class: 'field sort-field', title: '素材排序', onchange: e => { S.sort = e.target.value; this.render(root, win); } },
-        h('option', { value: 'newest', selected: S.sort === 'newest' ? 'selected' : null }, '最新修改'),
-        h('option', { value: 'oldest', selected: S.sort === 'oldest' ? 'selected' : null }, '最早修改'),
+        h('option', { value: 'newest', selected: S.sort === 'newest' || S.sort === 'oldest' ? 'selected' : null }, '最新在前'),
         h('option', { value: 'name', selected: S.sort === 'name' ? 'selected' : null }, '按名称'),
         h('option', { value: 'size', selected: S.sort === 'size' ? 'selected' : null }, '按大小'),
         h('option', { value: 'folder', selected: S.sort === 'folder' ? 'selected' : null }, '按文件夹'),
@@ -1232,7 +1287,8 @@ const AudioApp = {
         h('div', { class: 'audio-row-meta' },
           S.durSpans[f.path] = h('span', { class: 'audio-dur' }, ''),
           h('span', {}, f.sizeText),
-          h('span', { class: 'tag green' }, f.audioRole === 'bgm' ? 'BGM' : f.audioRole === 'sfx' ? '音效' : f.exportKind === 'voice' ? '人物音频' : '对白 / 音频'),
+          h('span', { class: 'tag green' }, f.audioRole === 'bgm' ? 'BGM' : f.audioRole === 'sfx' ? '音效' : f.voice?.sourcePath || f.exportKind === 'voice' ? '人物音频' : '对白 / 音频'),
+          ...(f.voice?.characterName ? [h('span', { class: 'tag blue', title: f.voice.description || '' }, f.voice.characterName)] : []),
           ...tags.map(tag => h('span', { class: 'tag blue' }, tag)),
         ),
       ),
@@ -2740,19 +2796,24 @@ function openSidebar() {
   const scrim = $('#sideScrim');
   const button = $('#menuBtn');
   if (!sidebar || !scrim || !button) return;
+  // 重开竞态：关闭动画未结束时再次打开，先取消在途关闭再显示。
+  cancelSurfaceHide(scrim);
   sidebar.classList.add('open');
   scrim.classList.remove('hidden');
   button.setAttribute('aria-expanded', 'true');
 }
 
-function closeSidebar() {
+function closeSidebar({ immediate = false } = {}) {
   const sidebar = $('#sidebar');
   const scrim = $('#sideScrim');
   const button = $('#menuBtn');
   if (!sidebar || !scrim || !button) return;
+  // 抽屉与 aria 状态立即收起，只有 scrim 的 hidden 延迟到退出动画后。
   sidebar.classList.remove('open');
-  scrim.classList.add('hidden');
   button.setAttribute('aria-expanded', 'false');
+  if (scrim.classList.contains('hidden')) return;
+  // 面板级退出 150ms。
+  hideSurface(scrim, 150, immediate);
 }
 
 function navItemButton(id, label) {
@@ -2819,6 +2880,8 @@ const Lightbox = {
     $('#lbPrev').style.display = hasList ? '' : 'none';
     $('#lbNext').style.display = hasList ? '' : 'none';
     $('#lbCount').textContent = hasList ? `${this.index + 1} / ${this.list.length}` : '';
+    // 重开竞态：退出动画未结束时再次打开，先取消在途关闭再显示。
+    cancelSurfaceHide($('#lightbox'));
     $('#lightbox').classList.remove('hidden');
     $('#lbName').textContent = f.name;
     const meta = f.meta || {};
@@ -2902,11 +2965,15 @@ const Lightbox = {
       ));
     }
   },
-  close() {
-    $('#lightbox').classList.add('hidden');
+  close({ immediate = false } = {}) {
+    const lightbox = $('#lightbox');
+    // 清理（停媒体、回调）立即执行，只有 hidden 本体延迟到退出动画后。
     $('#lbStage').replaceChildren();
     if (this.onChange) this.onChange();
     this.onChange = null;
+    if (lightbox.classList.contains('hidden')) return;
+    // 对话框级退出 180ms，兜底定时取 260ms。
+    hideSurface(lightbox, 260, immediate);
   },
   nav(dir) {
     if ($('#lightbox').classList.contains('hidden')) return;
@@ -2941,6 +3008,8 @@ const CompareBox = {
     const grid = $('#cmpGrid');
     grid.replaceChildren();
     for (const f of list) grid.appendChild(this.cell(f));
+    // 重开竞态：退出动画未结束时再次打开，先取消在途关闭再显示。
+    cancelSurfaceHide($('#compareBox'));
     $('#compareBox').classList.remove('hidden');
   },
   cell(f) {
@@ -2985,11 +3054,15 @@ const CompareBox = {
     $$('#cmpGrid video').forEach(v => { v.muted = false; v.play().catch(() => { v.muted = true; v.play().catch(() => {}); }); });
     $$('#cmpGrid audio').forEach(a => a.play().catch(() => {}));
   },
-  close() {
+  close({ immediate = false } = {}) {
+    const box = $('#compareBox');
+    // 停播与回调立即执行，只有 hidden 本体延迟到退出动画后。
     $$('#cmpGrid video, #cmpGrid audio').forEach(m => m.pause());
-    $('#compareBox').classList.add('hidden');
     if (this.onChange) this.onChange();
     this.onChange = null;
+    if (box.classList.contains('hidden')) return;
+    // 对话框级退出 180ms，兜底定时取 260ms。
+    hideSurface(box, 260, immediate);
   },
 };
 
@@ -2999,7 +3072,10 @@ const SearchPanel = {
   items: [],      // 扁平结果列表，供键盘导航
   selIdx: -1,
   open() {
-    $('#searchPanel').classList.remove('hidden');
+    const panel = $('#searchPanel');
+    // 重开竞态：退出动画未结束时再次打开，先取消在途关闭再显示。
+    cancelSurfaceHide(panel);
+    panel.classList.remove('hidden');
     const inp = $('#spInput');
     inp.value = '';
     inp.focus();
@@ -3007,7 +3083,12 @@ const SearchPanel = {
     this.selIdx = -1;
     this.render('');
   },
-  close() { $('#searchPanel').classList.add('hidden'); },
+  close({ immediate = false } = {}) {
+    const panel = $('#searchPanel');
+    if (panel.classList.contains('hidden')) return;
+    // 对话框级退出 180ms，兜底定时取 260ms。
+    hideSurface(panel, 260, immediate);
+  },
   move(dir) {
     if (!this.items.length) return;
     this.selIdx = (this.selIdx + dir + this.items.length) % this.items.length;
@@ -3170,6 +3251,8 @@ function refreshMediaLibraries() {
 }
 
 async function boot() {
+  // 入场门闸：真实浏览器尽早放开进入动画；自动化环境跳过门闸，直接呈现最终状态。
+  if (!navigator.webdriver) document.body.classList.add('motion-boot');
   const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
   document.documentElement.classList.toggle('is-electron', !!window.desktopOS?.isElectron);
   document.documentElement.classList.toggle('is-macos', isMac);
@@ -3205,6 +3288,12 @@ async function boot() {
     if ($('#sidebar').classList.contains('open')) closeSidebar(); else openSidebar();
   });
   $('#sideScrim').addEventListener('click', closeSidebar);
+
+  // 开关回弹：document 级委托统一处理，避免逐个按钮绑定。
+  document.addEventListener('click', event => {
+    const b = event.target.closest('button[aria-pressed], [role="switch"][aria-pressed]');
+    if (b && !b.disabled) playMotionTick(b);
+  });
 
   // 顶栏
   $('#tbHelpBtn').addEventListener('click', () => WM.open('help'));

@@ -2,6 +2,22 @@
 
 一个以网页创作为中心的本地视频工作台：集中管理**图片与视频创作网页**、**固定提示词**、**分剧本资产中心**、**音频与 BGM**、**成片**和**项目知识**。
 
+## 最新 Mac 源码：v1.2.4 · 2026-10-09
+
+[固定版本源码](https://github.com/SJT-bright/video-production-os/tree/v1.2.4) · [下载源码 ZIP](https://github.com/SJT-bright/video-production-os/archive/refs/tags/v1.2.4.zip) · [Mac 完整复现指南](MAC-REPRODUCE.md)
+
+本次同步本地 Mac 的最新功能源码，不是旧版 v1.2.1，也不是 Windows v1.2.3 安装包。源码包含界面图标、背景、构建脚本、锁定依赖和回归测试；第三方账号与个人创作数据不随源码分发。此标签为**源码发布**，自动生成的 Source code ZIP 需要安装依赖并构建，不是可双击的 App。
+
+- 人物音频：从视频预览提取原音轨、波形选区、循环试听、默认锁定 2.1 秒、命名并保存到本剧音频库，另存为额外副本；不自动分离说话人或背景音乐。
+- 下载视频：先选择“可剪辑”或“待处理”，再按下载开始时的剧本归档；并行同名不覆盖，未分类记录可重启继续处理。
+- 固定提示词：剧本右键主动迁移图片／视频两模式模板，追加而不覆盖，重复内容跳过；剧本各自保留草稿与模板。
+- 浏览器与资产：清空网页需确认，标签右键菜单使用独立原生小窗；普通文件夹可拖动排序，日期与素材最新在前。
+- 浮窗与素材管理：视频从卡片展开到置顶窗口，原文件拖出后自动收起；文件夹删除状态持久化，单个浏览器下载文件仍需明确确认后永久删除。
+- 同步已验证的浮层退出计时器、快速关闭／重开和窗口位置保存修正。
+- 资产分类支持右键后原位改名并保留分类身份；新导入按当前名称加序号编号，音频、成片和下载记录同步路径。
+
+复现方式、数据路径、Apple Silicon／Intel 构建命令及验证边界见 [MAC-REPRODUCE.md](MAC-REPRODUCE.md)。GitHub 旧版 Mac 安装包和 Windows 安装包不会因本次源码同步而自动更新。
+
 ## v1.2.1 · 2026-10-03
 
 - 固定提示词、剧本分组和段落、完整资产库支持点击顶部名称直接修改，不再占用单独的名称输入行；复制按钮与名称同排。
@@ -45,12 +61,12 @@
 
 ### 从 GitHub 启动
 
-需要 Node.js 22.12 或更新版本。macOS 打包目前依赖 `视频制作OS` 这个目录名，请按下面的结构克隆到一个单独的工作目录：
+需要 Node.js 22.12 或更新版本；本次复现使用 `.nvmrc` 固定的 26.7.0。macOS 源码绑定构建依赖 `视频制作OS` 这个目录名，请按下面的结构克隆到一个单独的工作目录：
 
 ```zsh
 mkdir -p video-production-workspace
 cd video-production-workspace
-git clone https://github.com/SJT-bright/video-production-os.git 视频制作OS
+git clone --branch v1.2.4 https://github.com/SJT-bright/video-production-os.git 视频制作OS
 cd 视频制作OS
 npm ci
 npm run desktop
@@ -70,7 +86,7 @@ npm run build:mac -- --arch arm64
 
 ## 启动
 
-### macOS 独立 APP（主版本）
+### macOS 源码绑定 APP（开发方式）
 
 以后以 macOS 为主：在 Mac 上保留并维护完整项目目录，直接使用独立的 `视频制作 OS.app` 做图片和视频创作。它不是网页快捷方式，而是 Electron 在 **真实 Mac** 上生成的 `.app`；图片／视频工作台、素材元数据、Agent 经验和文档批注都使用该项目中的唯一 `视频制作OS/data`，`.app` 包内绝不复制这些实时数据。
 
@@ -84,7 +100,7 @@ npm run build:mac -- --arch arm64
    ```
 
 4. Apple Silicon 自动生成 `dist/视频制作 OS-darwin-arm64/视频制作 OS.app`；Intel Mac 自动生成 `dist/视频制作 OS-darwin-x64/视频制作 OS.app`。在**未移动项目的位置**可以直接双击 `.app`；只要移动了整个项目目录、改过源码，或不确定包是否最新，就双击 `启动OS-mac.command`。启动器会先核验 `.app` 的应用主程序、Info.plist、CPU 架构以及当前源码的完整哈希清单；发现旧包、缺文件或清单不完整时会先重建，不会静默打开过时版本。孤立移动 `.app` 时应用会停止并提示使用启动器重建，绝不会在旧路径自动新建空台账。
-5. 如需另一种 CPU 架构，在对应 Mac／CI 上运行 `npm run build:mac -- --arch arm64` 或 `npm run build:mac -- --arch x64`。首版提供两个薄包，不把两个架构伪装成一个 universal 包。
+5. 如需另一种 CPU 架构，运行 `npm run build:mac -- --arch x64`；可移动构建及通用包使用 `--portable`，详见 [Mac 复现指南](MAC-REPRODUCE.md)。薄包与通用包在名称和构建清单中分别标记。
 
 **创作优先启动**：日常双击 `.app` 后直接进入**创作浏览器**（上次模式、当前剧本；首次使用为图片模式），不再先经过制作 OS 主窗口；主窗口在点「返回制作 OS」或切换剧本时按需打开。
 
@@ -98,7 +114,7 @@ npm run build:mac -- --arch arm64  # Apple Silicon
 
 浏览器回归测试只用于开发校验；第一次需要下载 Chromium 时，先运行 `npm run setup:test-browser`，再运行 `npm run test:browser`。这不影响正式 `.app` 的使用。
 
-非 macOS 环境只能完成源码与构建契约检查，不能生成可信可运行的 `.app`。本项目在 Mac 上构建后会执行本机 ad-hoc 签名与严格 Bundle 校验，适合当前开发 Mac 使用；要分发给其他 Mac，仍必须完成 Developer ID 签名、Apple notarization、staple 和隔离下载测试后才可发布。
+非 macOS 环境不能完成本机 `.app` 构建与 Bundle 验证。在 Mac 构建时执行本机 ad-hoc 签名与严格校验，不等于 Apple 公证。本标签只发布源码，不分发内置音频二进制；自行制作公开安装包前请核对 [音频组件与分发边界](MAC-REPRODUCE.md#音频组件与分发边界)。
 
 > 从 Windows 首次迁移到 Mac 时，先完整退出 Windows 版本，再复制整个项目目录。迁移完成后，请把 Mac 本地目录视为唯一工作副本：不要让 Windows 与 Mac 同时写入同一份 `data`，也不要用云盘／NAS 同步 SQLite 的 WAL 文件。旧 Windows 下载记录中带绝对盘符的文件会显示为历史记录；需要打开原文件时重新关联相应素材，新的 Mac 下载会按当前项目重新归档。
 

@@ -36,6 +36,7 @@ function flattenAssets(node, out) {
     (node.children || []).forEach(child => flattenAssets(child, out));
     return;
   }
+  if (node.type === 'video' && VideoDisposition.of(node) === 'processing') return;
   if (['video', 'audio'].includes(node.type)) out.push(node);
 }
 
@@ -47,19 +48,7 @@ function flattenAssets(node, out) {
 function assetBadge(item) {
   const stem = item.name.replace(/\.[^.]+$/, '');
   const seq = (stem.match(/[-_\s](\d{1,4})$/) || [])[1] || '';
-  const dirPart = String(item.path || '').replace(/[^/]+$/, '');
-  const dateMatches = [...dirPart.matchAll(/(\d{4})-(\d{2})-(\d{2})/g)];
-  let year, month, day;
-  if (dateMatches.length) {
-    [, year, month, day] = dateMatches[dateMatches.length - 1];
-  } else if (item.mtime) {
-    const local = new Date(item.mtime);
-    if (!Number.isNaN(local.getTime())) {
-      year = String(local.getFullYear());
-      month = String(local.getMonth() + 1).padStart(2, '0');
-      day = String(local.getDate()).padStart(2, '0');
-    }
-  }
+  const [year, month, day] = AssetOrder.assetDateKey(item).split('-');
   const shortDate = month ? `${Number(month)}/${Number(day)}` : '';
   const fullDate = year ? `${year}-${month}-${day}` : '';
   return {
@@ -72,9 +61,7 @@ function assetBadge(item) {
 }
 
 function newestFirst(a, b) {
-  return assetBadge(b).date.localeCompare(assetBadge(a).date)
-    || ((Date.parse(b.mtime) || 0) - (Date.parse(a.mtime) || 0))
-    || b.name.localeCompare(a.name, 'zh-CN', { numeric: true });
+  return AssetOrder.newestFirst(a, b);
 }
 
 let coverObserver = null;
@@ -169,6 +156,11 @@ function updateChipsAndStatus() {
 }
 
 function renderList() {
+  // 动效层：首次列表渲染保留一次性入场标记（前 12 张卡片交错淡入），900ms 后摘除，
+  // 之后的刷新/过滤重渲染不再闪动；纯观感，不参与任何渲染数据与测试断言。
+  if (document.body.classList.contains('motion-in')) {
+    setTimeout(() => document.body.classList.remove('motion-in'), 900);
+  }
   updateChipsAndStatus();
   const files = state.assets.filter(item => item.type === state.filter);
   renderLog.push(`selectMode=${selectMode} sel=${selectionOrder.length} files=${files.length}`);
@@ -294,9 +286,13 @@ function renderList() {
 el.trayChips.addEventListener('click', event => {
   const button = event.target.closest('.chip');
   if (!button) return;
+  // 换页动效只在筛选值真正变化的那一次渲染后播：以赋值前的旧值对比判定，前后相等不播。
+  // 点已激活 chip、同 filter 的数据刷新、项目切换、多选开关都不经过这里，避免每次刷新都闪。
+  const filterChanged = state.filter !== button.dataset.filter;
   state.filter = button.dataset.filter;
   el.trayChips.querySelectorAll('.chip').forEach(chip => chip.classList.toggle('on', chip === button));
   renderList();
+  if (filterChanged) playListSwap();
 });
 
 el.trayRefresh.addEventListener('click', () => loadAssets().catch(() => {}));
@@ -355,5 +351,63 @@ events.addEventListener('creative-projects', () => { loadAssets().catch(() => {}
 
 // 只读观测口（测试/诊断用）
 window.__trayDebug = () => ({ selectMode, selection: [...selectionOrder], assets: state.assets.length, renderLog: [...renderLog] });
+
+// —— 动效层（仅观感，契约与主窗口一致）——
+// 入场标记：自动化环境（navigator.webdriver）不注入，测试页面完全静态；
+// 真实窗口加载后播整体入场 + 首次列表交错淡入，标记由 renderList 延时摘除。
+if (!navigator.webdriver) document.body.classList.add('motion-in');
+// 开关回弹：chip 切换、多选开关（aria-pressed）点击时播一次 motion-tick，
+// 动画结束由 playMotionClass 自摘（与 creator.js 同一套实现，400ms 兜底）。
+function playMotionClass(node, cls, fallbackMs, animationNames) {
+  if (!node) return;
+  let timer = 0;
+  const finish = () => {
+    node.removeEventListener('animationend', onAnimationEnd);
+    if (timer) { clearTimeout(timer); timer = 0; }
+    node.classList.remove(cls);
+  };
+  function onAnimationEnd(event) {
+    if (event.target !== node || !animationNames.includes(event.animationName)) return;
+    finish();
+  }
+  node.classList.add(cls);
+  node.addEventListener('animationend', onAnimationEnd);
+  timer = setTimeout(finish, fallbackMs);
+}
+document.addEventListener('click', event => {
+  if (!(event.target instanceof Element)) return;
+  const toggle = event.target.closest('.chip, button[aria-pressed]');
+  if (toggle && !toggle.disabled) playMotionClass(toggle, 'motion-tick', 400, ['motionTick']);
+});
+
+// 筛选换页：筛选值真正变化的渲染完成后给列表容器挂 motion-swap，前 8 张卡交错淡入；
+// 空列表等收不到 animationend 的情况由 320ms 兜底自摘。
+let stopListSwap = null;
+function playListSwap() {
+  const list = el.trayList;
+  if (!list) return;
+  // 320ms 内连点 chip 时先终止上一轮（监听/计时器），再摘类并强制 reflow，动画才能重启而不是被同类名吞掉
+  if (stopListSwap) stopListSwap();
+  let timer = 0;
+  let endedCount = 0;
+  function finish() {
+    list.removeEventListener('animationend', onAnimationEnd);
+    if (timer) { clearTimeout(timer); timer = 0; }
+    list.classList.remove('motion-swap');
+    stopListSwap = null;
+  }
+  function onAnimationEnd(event) {
+    if (event.animationName !== 'motionSwapIn') return;
+    // 交错淡入按张次先后结束：等最后一张（≤8 张）收尾再摘类，早摘会砍掉后面几张的动画
+    endedCount += 1;
+    if (endedCount < Math.min(list.querySelectorAll('.tray-card').length, 8)) return;
+    finish();
+  }
+  list.classList.remove('motion-swap');
+  void list.offsetWidth;
+  list.classList.add('motion-swap');
+  list.addEventListener('animationend', onAnimationEnd);
+  timer = setTimeout(finish, 320);
+}
 
 loadAssets();

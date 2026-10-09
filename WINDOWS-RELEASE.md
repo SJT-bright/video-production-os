@@ -2,6 +2,8 @@
 
 [下载最新版](https://github.com/SJT-bright/video-production-os-windows/releases/latest)
 
+当前公开 Windows 安装包为 v1.2.3。Mac 源码 v1.2.4 同步的新增人物音频截取、视频下载待处理分类和固定模板迁移，不代表 Windows 安装包也已更新；两条发布渠道分别验证。
+
 下载 `VideoProductionOS-Windows-x64.zip`，完整解压后双击 `视频制作OS.exe`。无需安装 Node.js。EXE 必须与旁边的 DLL、resources、locales 等文件保持在一起；旧版只提供单个主 EXE，不能作为完整安装包使用。
 
 Windows x64 下载版与主项目同步创作浏览器、分剧本资产、音频／成片索引与固定提示词代码。第三方平台仍可能限制内嵌登录。

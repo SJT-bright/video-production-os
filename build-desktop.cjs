@@ -85,7 +85,7 @@ function backupLegacyDataBeforeReplace() {
 }
 
 async function build() {
-  await prepareMediaTools('win32', 'x64');
+  await prepareMediaTools('win32', 'x64', { redistributable: PORTABLE_RELEASE });
   assertGeneratedTarget(TARGET_DIR);
   const legacyBackup = backupLegacyDataBeforeReplace();
 
@@ -111,6 +111,7 @@ async function build() {
     fs.writeFileSync(path.join(stageDir, 'build-manifest.json'), `${JSON.stringify({
       buildSchemaVersion: BUILD_SCHEMA_VERSION,
       product: '视频制作 OS',
+      appVersion: require('./package.json').version,
       platform: 'win32',
       arch: 'x64',
       builtAt: new Date().toISOString(),
@@ -142,6 +143,8 @@ async function build() {
       electronZipDir: path.dirname(electronZip),
       overwrite: true,
       prune: false,
+      // The public package is already sanitized; preserve the exact source hash.
+      sanitizePackageJson: [value => value],
       asar: false,
     });
     if (!Array.isArray(apps) || apps.length !== 1) {

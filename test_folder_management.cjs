@@ -63,7 +63,7 @@ const write = (name, data) => fs.writeFileSync(path.join(fixture, 'data', name),
     assert.equal(read('audio-library.json').ignoredPaths[0], `${project.folder}/角色声音/忽略.wav`);
     const wav = Buffer.alloc(100); wav.write('RIFF'); wav.writeUInt32LE(92, 4); wav.write('WAVE', 8);
     const importedVoice = await api(`/api/library-import?project=${project.id}&kind=audio&name=old.wav`, wav, true);
-    assert.equal(importedVoice.name, '角色声音001.wav');
+    assert.equal(importedVoice.name, 'old.wav', '文件选择器音频导入保留原名称');
     await api('/api/scan');
     assert.ok(read('audio-library.json').items.some(item => item.path === importedVoice.path && item.kind === 'voice'));
     assert.throws(() => server.renameCreativeFolder(project.id, renamed, '人物资产'), /已经存在/);

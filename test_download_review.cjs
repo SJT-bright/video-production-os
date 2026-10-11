@@ -18,7 +18,7 @@ const VideoDisposition = require('./assets/ui/video-disposition.js');
     const a = store.create({ name: '下载剧本甲' }), b = store.create({ name: '下载剧本乙' });
     const targetFor = entry => resolveDownloadTarget({ projectRoot: root, filename: entry.filename, mimeType: 'video/mp4',
       serviceId: entry.serviceId, serviceLabel: entry.serviceLabel, videoDisposition: entry.choice,
-      projectDirectories: { video: store.category(entry.projectId, 'generated-videos').absolutePath }, now: new Date(`${entry.day}T12:00:00`) }).targetPath;
+      projectDirectories: { video: store.category(entry.projectId, 'generated-videos').absolutePath }, legacyDay: entry.day }).targetPath;
     const validateTarget = (entry, destination) => {
       const base = path.join(store.category(entry.projectId, 'generated-videos').absolutePath, entry.choice === 'processing' ? '待处理' : '可剪辑');
       const relative = path.relative(base, destination);
